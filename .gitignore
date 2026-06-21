@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+env/
+
+# TESS data cache
+real_tess/cache/*.fits
+real_tess/cache/*.fits.gz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large model artefacts (if any land here)
+*.pkl
+*.h5

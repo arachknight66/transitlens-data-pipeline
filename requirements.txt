@@ -1,0 +1,12 @@
+# Core — always required
+numpy>=1.24
+pandas>=2.0
+scipy>=1.11
+pyyaml>=6.0
+
+# Testing
+pytest>=7.4
+
+# Real TESS — comment out for offline / hackathon demo mode
+# lightkurve>=2.4
+# astroquery>=0.4.6
