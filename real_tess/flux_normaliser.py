@@ -82,11 +82,18 @@ def normalise_pdcsap(flux_raw, quality_flags=None, clip_sigma=5.0):
     # Step 3: normalise so the unflagged median becomes 1.0
     flux = flux / median
 
-    # Step 4: clip extreme outliers beyond clip_sigma, computed on the
-    # normalised data. np.clip leaves NaNs untouched, so flagged
-    # cadences stay NaN rather than being silently clipped to a bound.
+    # Step 4: clip extreme outliers beyond clip_sigma. Using plain
+    # np.std here would be circular: a single huge outlier (TESS
+    # momentum-dump spikes can be many orders of magnitude off) can
+    # inflate the std enough that the clip threshold no longer
+    # excludes it. The median absolute deviation (MAD), scaled by
+    # 1.4826 to approximate a Gaussian sigma, is robust to exactly
+    # this failure mode since the median barely moves when a handful
+    # of points are extreme. np.clip leaves NaNs untouched, so
+    # flagged cadences stay NaN rather than being clipped to a bound.
     normalised_finite = flux[np.isfinite(flux)]
-    sigma = float(np.nanstd(normalised_finite))
+    mad = float(np.nanmedian(np.abs(normalised_finite - 1.0)))
+    sigma = 1.4826 * mad
     if sigma > 0:
         lower = 1.0 - clip_sigma * sigma
         upper = 1.0 + clip_sigma * sigma
