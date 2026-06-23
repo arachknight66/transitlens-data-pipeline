@@ -1,7 +1,7 @@
 # Dataset Schema
 
-> **Purpose:** Defines the exact column contract for all dataset files in `transitlens-data-pipeline`.  
-> Every CSV in `datasets/` and `datasets/splits/` must conform to this schema.  
+> **Purpose:** Defines the exact column contract for all dataset files in `transitlens-data-pipeline`.
+> Every CSV in `datasets/` and `datasets/splits/` must conform to this schema.
 > `transitlens-ml-core` depends on these column names and types — do not rename without updating both repos.
 
 ---

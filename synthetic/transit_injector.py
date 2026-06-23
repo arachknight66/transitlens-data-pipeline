@@ -8,10 +8,33 @@ Supports:
 - V-shaped transits (eclipsing binary-like triangular dip)
 - Secondary eclipses at phase 0.5
 
-All functions modify flux in-place for efficiency.
+Performance note
+-----------------
+The original implementation looped over every timestamp in pure
+Python (`for i in range(len(time))`), which is O(n) with heavy
+interpreter overhead — for n ~ 18,000 points this dominates the
+runtime of the whole generation pipeline. Every function below has
+been rewritten using numpy vectorised boolean masking, so the
+in-transit test and depth scaling are applied to the whole array at
+once in compiled C code. Outputs are numerically identical to the
+original loop-based version; only the implementation changed.
 """
 
 import numpy as np
+
+
+def _wrapped_phase(time, period_days, t0):
+    """
+    Computes phase centred on [-0.5, 0.5) relative to t0, vectorised.
+
+    Returns
+    -------
+    np.ndarray
+        Phase array, same length as time.
+    """
+    phase = ((time - t0) % period_days) / period_days
+    phase = np.where(phase > 0.5, phase - 1.0, phase)
+    return phase
 
 
 def inject_transit(flux, time, period_days, depth, duration_days,
@@ -21,7 +44,6 @@ def inject_transit(flux, time, period_days, depth, duration_days,
 
     For each timestamp t:
       phase = ((t - t0) % period_days) / period_days
-      phase_duration = duration_days / period_days
 
       If phase < phase_duration (in-transit):
         - Box shape:  flux[i] *= (1 - depth)
@@ -53,27 +75,18 @@ def inject_transit(flux, time, period_days, depth, duration_days,
     if t0 is None:
         t0 = period_days / 4.0
 
+    time = np.asarray(time, dtype=np.float64)
     phase_duration = duration_days / period_days
+    half_dur = phase_duration / 2.0
 
-    for i in range(len(time)):
-        # Compute phase within [0, 1)
-        phase = ((time[i] - t0) % period_days) / period_days
+    phase = _wrapped_phase(time, period_days, t0)
+    in_transit = np.abs(phase) < half_dur
 
-        # Centre the transit on phase=0 by shifting to [-0.5, 0.5)
-        if phase > 0.5:
-            phase -= 1.0
-
-        half_dur = phase_duration / 2.0
-
-        if abs(phase) < half_dur:
-            if v_shape:
-                # Triangle: max depth at centre (phase=0), zero at edges
-                # fraction goes from 1.0 at centre to 0.0 at edge
-                fraction = 1.0 - abs(phase) / half_dur
-                flux[i] *= (1.0 - depth * fraction)
-            else:
-                # Box: uniform depth across the entire transit window
-                flux[i] *= (1.0 - depth)
+    if v_shape:
+        fraction = 1.0 - np.abs(phase[in_transit]) / half_dur
+        flux[in_transit] *= (1.0 - depth * fraction)
+    else:
+        flux[in_transit] *= (1.0 - depth)
 
     return flux
 
@@ -110,22 +123,18 @@ def inject_secondary_eclipse(flux, time, period_days, secondary_depth,
     if t0 is None:
         t0 = period_days / 4.0
 
+    time = np.asarray(time, dtype=np.float64)
+
     # Secondary eclipse occurs at half-period offset from primary
     t0_secondary = t0 + period_days / 2.0
     phase_duration = duration_days / period_days
+    half_dur = phase_duration / 2.0
 
-    for i in range(len(time)):
-        phase = ((time[i] - t0_secondary) % period_days) / period_days
+    phase = _wrapped_phase(time, period_days, t0_secondary)
+    in_eclipse = np.abs(phase) < half_dur
 
-        # Centre on phase=0
-        if phase > 0.5:
-            phase -= 1.0
-
-        half_dur = phase_duration / 2.0
-
-        if abs(phase) < half_dur:
-            # Secondary eclipses are always box-shaped (thermal occultation)
-            flux[i] *= (1.0 - secondary_depth)
+    # Secondary eclipses are always box-shaped (thermal occultation)
+    flux[in_eclipse] *= (1.0 - secondary_depth)
 
     return flux
 
@@ -156,21 +165,25 @@ def compute_transit_count(time, period_days, duration_days, t0=None):
     if t0 is None:
         t0 = period_days / 4.0
 
-    time = np.asarray(time)
+    time = np.asarray(time, dtype=np.float64)
     time_span = time[-1] - time[0]
 
     # Maximum possible number of transits in the time span
     max_transits = int(np.ceil(time_span / period_days)) + 1
 
-    count = 0
-    for n in range(max_transits):
-        transit_mid = t0 + n * period_days
-        transit_start = transit_mid - duration_days / 2.0
-        transit_end = transit_mid + duration_days / 2.0
+    # Vectorised: build all transit windows at once and test each
+    # against the full time array via broadcasting. max_transits is
+    # small (typically < 30), so this is a cheap (max_transits x N)
+    # boolean comparison rather than max_transits separate full-array
+    # passes inside a Python loop.
+    n = np.arange(max_transits)
+    transit_mids = t0 + n * period_days          # shape (T,)
+    transit_starts = transit_mids - duration_days / 2.0
+    transit_ends = transit_mids + duration_days / 2.0
 
-        # Check if any data points fall within this transit window
-        in_transit = np.any((time >= transit_start) & (time <= transit_end))
-        if in_transit:
-            count += 1
+    # Broadcasting: time[None, :] vs starts/ends[:, None] -> (T, N)
+    in_window = (time[None, :] >= transit_starts[:, None]) & \
+                (time[None, :] <= transit_ends[:, None])
 
-    return count
+    visible = np.any(in_window, axis=1)  # shape (T,)
+    return int(np.sum(visible))
