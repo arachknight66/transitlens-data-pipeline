@@ -9,6 +9,15 @@ This is the main orchestrator for Phase 1. It:
 3. Delegates to noise_models.py for noise injection
 4. Delegates to transit_injector.py for transit signal injection
 5. Writes output CSVs to synthetic/cases/
+
+Performance note
+-----------------
+`generate_all_cases` previously called `generate_from_config(config_path, ...)`
+once per case, which re-opened and re-parsed config.yaml from disk on every
+iteration. `generate_from_config` now also accepts an already-loaded config
+dict, so the YAML file is parsed exactly once regardless of how many cases
+are generated. This is a minor win for 3 cases but matters once more cases
+are added (Phase 1 is designed to scale to many synthetic targets).
 """
 
 import os
@@ -19,6 +28,11 @@ import yaml
 
 from synthetic.noise_models import add_gaussian_noise, add_red_noise, add_stellar_variability
 from synthetic.transit_injector import inject_transit, inject_secondary_eclipse
+
+
+def _load_config(config_path):
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
 
 
 def make_time_array(n_points, time_span_days, cadence_minutes, seed=None):
@@ -90,8 +104,9 @@ def generate_from_config(config_path, case_name):
 
     Parameters
     ----------
-    config_path : str
-        Path to config.yaml.
+    config_path : str or dict
+        Path to config.yaml, OR an already-loaded config dict (avoids
+        re-reading/re-parsing the YAML file when generating many cases).
     case_name : str
         Key in config['cases'] (e.g. 'candidate_a').
 
@@ -100,8 +115,7 @@ def generate_from_config(config_path, case_name):
     tuple of (np.ndarray, np.ndarray, dict)
         (time, flux, metadata_dict)
     """
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config = config_path if isinstance(config_path, dict) else _load_config(config_path)
 
     gen = config['generation']
     case = config['cases'][case_name]
@@ -185,13 +199,14 @@ def generate_all_cases(config_path, output_dir):
     output_dir : str
         Directory to write output CSVs. Created if it doesn't exist.
     """
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config = _load_config(config_path)
 
     os.makedirs(output_dir, exist_ok=True)
 
     for case_name in config['cases']:
-        time, flux, metadata = generate_from_config(config_path, case_name)
+        # Pass the already-loaded config dict so the YAML file is
+        # parsed only once for the whole batch, not once per case.
+        time, flux, metadata = generate_from_config(config, case_name)
 
         # Write CSV
         df = pd.DataFrame({'time': time, 'flux': flux})

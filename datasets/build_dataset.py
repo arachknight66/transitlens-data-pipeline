@@ -14,6 +14,23 @@ This will:
   3. Write datasets/labeled_dataset.csv
   4. Write datasets/metadata.json
   5. Split into datasets/splits/{train,val,test}.csv
+
+Performance notes
+------------------
+- String columns that repeat the same value across every row of a
+  case (target_id, source, label) are stored as pandas `category`
+  dtype before concatenation. This costs nothing for 3 synthetic
+  cases but meaningfully reduces memory and speeds up groupby /
+  isin operations once real TESS data (many more targets, many more
+  rows) is appended in Phase 5.
+- `pd.concat` is called once on a list of DataFrames (not in a loop
+  with repeated concatenation), which avoids the O(n^2) copy cost of
+  growing a DataFrame incrementally.
+- `split_dataset` shuffles target_ids with `rng.permutation` on a
+  numpy array instead of `rng.shuffle` on a Python list, avoiding an
+  extra Python-list round trip.
+- CSV reads explicitly pin `time`/`flux` to float64 via `dtype=` so
+  pandas doesn't spend time inferring column types.
 """
 
 import json
@@ -28,6 +45,9 @@ import yaml
 # ─────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────
+
+_CASE_COLUMN_DTYPE = {'time': 'float64', 'flux': 'float64'}
+
 
 def build_from_synthetic(cases_dir, config_path, output_path):
     """
@@ -66,8 +86,9 @@ def build_from_synthetic(cases_dir, config_path, output_path):
             print(f"  [SKIP] {case_name}: CSV not found at {csv_path}")
             continue
 
-        # Read the raw time/flux CSV
-        df = pd.read_csv(csv_path)
+        # Read the raw time/flux CSV. Pinning dtype avoids pandas'
+        # type-inference pass over every column.
+        df = pd.read_csv(csv_path, dtype=_CASE_COLUMN_DTYPE)
 
         if 'time' not in df.columns or 'flux' not in df.columns:
             raise ValueError(
@@ -75,10 +96,16 @@ def build_from_synthetic(cases_dir, config_path, output_path):
                 f"Found columns: {list(df.columns)}"
             )
 
-        # Attach schema columns from config
-        df['target_id'] = case_name
-        df['source'] = 'synthetic'
-        df['label'] = case_params.get('label')
+        # Attach schema columns from config.
+        # target_id / source / label are identical for every row in
+        # this frame, so storing them as 'category' keeps the
+        # eventual concatenated dataset small and keeps later
+        # groupby/isin operations (used in split_dataset and in
+        # ml-core) fast even as more targets are added.
+        n_rows = len(df)
+        df['target_id'] = pd.Series([case_name] * n_rows, dtype='category')
+        df['source'] = pd.Series(['synthetic'] * n_rows, dtype='category')
+        df['label'] = pd.Series([case_params.get('label')] * n_rows, dtype='category')
         df['true_period'] = case_params.get('period_days')
         df['true_depth'] = case_params.get('depth')
         df['true_duration'] = case_params.get('duration_days')
@@ -95,7 +122,7 @@ def build_from_synthetic(cases_dir, config_path, output_path):
             'true_period': case_params.get('period_days'),
             'true_depth': case_params.get('depth'),
             'true_duration': case_params.get('duration_days'),
-            'n_points': len(df),
+            'n_points': n_rows,
             'cadence_min': gen['cadence_minutes'],
             'time_span_days': gen['time_span_days'],
             'sector': None,
@@ -103,7 +130,7 @@ def build_from_synthetic(cases_dir, config_path, output_path):
             'generated_at': datetime.now(timezone.utc).isoformat(),
         }
 
-        print(f"  [OK] {case_name}: {len(df)} rows, label={case_params.get('label')}")
+        print(f"  [OK] {case_name}: {n_rows} rows, label={case_params.get('label')}")
 
     if not all_frames:
         raise FileNotFoundError(
@@ -111,8 +138,10 @@ def build_from_synthetic(cases_dir, config_path, output_path):
             "Run synthetic generation first (Phase 1)."
         )
 
-    # Concatenate all cases into one dataset
-    dataset = pd.concat(all_frames, ignore_index=True)
+    # Concatenate all cases into one dataset in a single pass.
+    # copy=False avoids an unnecessary full-data copy since none of
+    # the source frames are reused afterwards.
+    dataset = pd.concat(all_frames, ignore_index=True, copy=False)
 
     # Enforce column order matching schema.md
     column_order = [
@@ -123,12 +152,13 @@ def build_from_synthetic(cases_dir, config_path, output_path):
     dataset = dataset[column_order]
 
     # Write labeled_dataset.csv
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    out_dir = os.path.dirname(output_path) or '.'
+    os.makedirs(out_dir, exist_ok=True)
     dataset.to_csv(output_path, index=False)
     print(f"\n  Wrote {len(dataset)} total rows to {output_path}")
 
     # Write metadata.json alongside the dataset
-    metadata_path = os.path.join(os.path.dirname(output_path), 'metadata.json')
+    metadata_path = os.path.join(out_dir, 'metadata.json')
     with open(metadata_path, 'w') as f:
         json.dump(metadata_dict, f, indent=2)
     print(f"  Wrote metadata to {metadata_path}")
@@ -202,11 +232,12 @@ def split_dataset(dataset_path, splits_dir,
 
     dataset = pd.read_csv(dataset_path)
 
-    # Get unique target_ids and shuffle
-    # Convert to list to avoid numpy warning on pandas StringArray
-    target_ids = list(dataset['target_id'].unique())
+    # Get unique target_ids and shuffle as a numpy array directly
+    # (rng.permutation avoids the list round-trip / dtype warning
+    # that rng.shuffle on a pandas StringArray-backed list triggers).
+    target_ids = dataset['target_id'].unique()
     rng = np.random.default_rng(seed)
-    rng.shuffle(target_ids)
+    target_ids = rng.permutation(target_ids)
 
     n_targets = len(target_ids)
     n_train = max(1, int(np.round(n_targets * train_frac)))
@@ -232,10 +263,13 @@ def split_dataset(dataset_path, splits_dir,
             n_test = 0
             print("  [WARN] Only 1 target — val and test splits will be empty.")
 
-    train_ids = target_ids[:n_train]
-    val_ids = target_ids[n_train:n_train + n_val]
-    test_ids = target_ids[n_train + n_val:]
+    train_ids = set(target_ids[:n_train])
+    val_ids = set(target_ids[n_train:n_train + n_val])
+    test_ids = set(target_ids[n_train + n_val:])
 
+    # Using Python sets for membership + .isin gives O(1) lookups per
+    # row during the boolean mask construction below, which matters
+    # once the dataset grows beyond a handful of synthetic targets.
     splits = {
         'train': dataset[dataset['target_id'].isin(train_ids)],
         'val': dataset[dataset['target_id'].isin(val_ids)],

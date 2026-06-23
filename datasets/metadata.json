@@ -11,7 +11,7 @@
     "time_span_days": 27.0,
     "sector": null,
     "seed": 42,
-    "generated_at": "2026-06-21T12:14:56.387324+00:00"
+    "generated_at": "2026-06-23T06:16:09.259473+00:00"
   },
   "candidate_b": {
     "target_id": "candidate_b",
@@ -25,7 +25,7 @@
     "time_span_days": 27.0,
     "sector": null,
     "seed": 43,
-    "generated_at": "2026-06-21T12:14:56.401895+00:00"
+    "generated_at": "2026-06-23T06:16:09.278026+00:00"
   },
   "candidate_c": {
     "target_id": "candidate_c",
@@ -39,6 +39,6 @@
     "time_span_days": 27.0,
     "sector": null,
     "seed": 44,
-    "generated_at": "2026-06-21T12:14:56.415079+00:00"
+    "generated_at": "2026-06-23T06:16:09.296319+00:00"
   }
 }
