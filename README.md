@@ -21,16 +21,13 @@ It handles:
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Verify install
-python -c "import numpy, pandas, scipy, yaml; print('OK')"
-
-# 3. Generate synthetic light curves
+# 2. Generate synthetic light curves
 python -c "
 from synthetic.generator import generate_all_cases
 generate_all_cases('synthetic/config.yaml', 'synthetic/cases')
 "
 
-# 4. Load a light curve via interface
+# 3. Load a light curve via interface
 python -c "
 from interface import load_light_curve
 result = load_light_curve('synthetic', 'candidate_a')

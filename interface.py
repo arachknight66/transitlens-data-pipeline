@@ -47,6 +47,30 @@ _VALID_LABELS = {"exoplanet_like", "eclipsing_binary_like", "noise_or_other"}
 
 
 # ─────────────────────────────────────────────
+# Exception Hierarchy
+# ─────────────────────────────────────────────
+
+class DataPipelineError(Exception):
+    """Base exception for all transitlens-data-pipeline errors."""
+    pass
+
+class DataShapeError(DataPipelineError):
+    pass
+
+class DataQualityError(DataPipelineError):
+    pass
+
+class DataNormalisationError(DataPipelineError):
+    pass
+
+class InvalidSourceError(DataPipelineError):
+    pass
+
+class InvalidLabelError(DataPipelineError):
+    pass
+
+
+# ─────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────
 
@@ -94,7 +118,7 @@ def load_light_curve(source, target_id, config=None):
     elif source == "csv":
         return _load_csv(target_id, config)
     else:
-        raise ValueError(
+        raise InvalidSourceError(
             f"Unknown source: {source!r}. Must be one of {_VALID_SOURCES}."
         )
 
@@ -325,14 +349,25 @@ def _read_light_curve_csv(csv_path):
 
 def _build_result(time, flux, target_id, source, metadata):
     if len(time) != len(flux):
-        raise ValueError(
+        raise DataShapeError(
             f"time and flux length mismatch for '{target_id}': "
             f"{len(time)} vs {len(flux)}."
         )
 
+    if any(time[i] >= time[i+1] for i in range(len(time)-1)):
+        raise DataQualityError("time array must be monotonically increasing.")
+
+    if abs(np.median(flux) - 1.0) >= 0.001:
+        raise DataNormalisationError(
+            f"Flux median must be ~1.0, got {np.median(flux)}"
+        )
+
+    if source not in _VALID_SOURCES:
+        raise InvalidSourceError(f"Unknown source: {source!r}. Must be one of {_VALID_SOURCES}.")
+
     label = metadata.get("label")
     if label is not None and label not in _VALID_LABELS:
-        raise ValueError(
+        raise InvalidLabelError(
             f"Invalid label '{label}' for '{target_id}'. "
             f"Must be one of {sorted(_VALID_LABELS)} or None."
         )

@@ -55,9 +55,10 @@ def test_flux_values_normalised(target_id):
     assert abs(statistics.median(result["flux"]) - 1.0) < 0.01
 
 
-def test_unknown_source_raises_value_error():
-    # load_light_curve("unknown_source", "x") must raise ValueError
-    with pytest.raises(ValueError):
+def test_unknown_source_raises_invalid_source_error():
+    # load_light_curve("unknown_source", "x") must raise InvalidSourceError
+    from interface import InvalidSourceError
+    with pytest.raises(InvalidSourceError):
         load_light_curve("unknown_source", "x")
 
 

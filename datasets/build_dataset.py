@@ -139,9 +139,7 @@ def build_from_synthetic(cases_dir, config_path, output_path):
         )
 
     # Concatenate all cases into one dataset in a single pass.
-    # copy=False avoids an unnecessary full-data copy since none of
-    # the source frames are reused afterwards.
-    dataset = pd.concat(all_frames, ignore_index=True, copy=False)
+    dataset = pd.concat(all_frames, ignore_index=True)
 
     # Enforce column order matching schema.md
     column_order = [
