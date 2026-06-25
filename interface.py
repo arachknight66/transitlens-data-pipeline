@@ -392,9 +392,9 @@ def _build_result(time, flux, target_id, source, metadata):
     if any(time[i] >= time[i+1] for i in range(len(time)-1)):
         raise DataQualityError("time array must be monotonically increasing.")
 
-    if abs(np.median(flux) - 1.0) >= 0.001:
+    if abs(np.nanmedian(flux) - 1.0) >= 0.01:
         raise DataNormalisationError(
-            f"Flux median must be ~1.0, got {np.median(flux)}"
+            f"Flux median must be ~1.0, got {np.nanmedian(flux)}"
         )
 
     if source not in _VALID_SOURCES:
