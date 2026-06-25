@@ -42,7 +42,7 @@ import yaml
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-_VALID_SOURCES = ("synthetic", "tess", "csv")
+_VALID_SOURCES = ("synthetic", "tess", "csv", "fits")
 _VALID_LABELS = {"exoplanet_like", "eclipsing_binary_like", "noise_or_other"}
 
 
@@ -117,6 +117,8 @@ def load_light_curve(source, target_id, config=None):
         return _load_tess(target_id, config)
     elif source == "csv":
         return _load_csv(target_id, config)
+    elif source == "fits":
+        return _load_fits(target_id, config)
     else:
         raise InvalidSourceError(
             f"Unknown source: {source!r}. Must be one of {_VALID_SOURCES}."
@@ -330,6 +332,57 @@ def _load_csv(target_id, config):
     }
 
     return _build_result(time, flux, target_id, "csv", metadata)
+
+
+# ─────────────────────────────────────────────
+# source = "fits"
+# ─────────────────────────────────────────────
+
+def _load_fits(target_id, config):
+    """
+    Loads a light curve directly from a local FITS file.
+    """
+    path = config.get("path")
+    if not path:
+        raise ValueError("source='fits' requires config={'path': '/path/to/file.fits'}.")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"FITS file not found at {path}.")
+        
+    try:
+        import lightkurve as lk
+    except ImportError as exc:
+        raise ImportError("source='fits' requires the 'lightkurve' package.") from exc
+        
+    lc = lk.read(path)
+    time = np.asarray(lc.time.value, dtype=np.float64)
+    flux_raw = np.asarray(lc.flux.value, dtype=np.float64)
+    quality = np.asarray(lc.quality, dtype=np.int64) if hasattr(lc, "quality") else None
+    
+    from real_tess.flux_normaliser import normalise_pdcsap
+    flux_norm = normalise_pdcsap(flux_raw, quality_flags=quality)
+    
+    # Drop NaNs
+    valid = np.isfinite(time) & np.isfinite(flux_norm)
+    time_clean = time[valid]
+    flux_clean = flux_norm[valid]
+    
+    cadence_min = config.get("cadence_min")
+    if cadence_min is None and len(time_clean) > 1:
+        cadence_min = float(np.median(np.diff(time_clean)) * 1440.0)
+        
+    time_span_days = float(time_clean[-1] - time_clean[0]) if len(time_clean) > 1 else 0.0
+    
+    metadata = {
+        "cadence_min": cadence_min,
+        "time_span_days": time_span_days,
+        "sector": getattr(lc, "sector", config.get("sector")),
+        "label": config.get("label"),
+        "true_period": config.get("true_period"),
+        "true_depth": config.get("true_depth"),
+        "true_duration": config.get("true_duration"),
+    }
+    
+    return _build_result(time_clean.tolist(), flux_clean.tolist(), target_id, "fits", metadata)
 
 
 # ─────────────────────────────────────────────
