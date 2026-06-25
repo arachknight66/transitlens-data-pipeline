@@ -8,5 +8,5 @@ pyyaml>=6.0
 pytest>=7.4
 
 # Real TESS — comment out for offline / hackathon demo mode
-# lightkurve>=2.4
-# astroquery>=0.4.6
+lightkurve>=2.4
+astroquery>=0.4.6
