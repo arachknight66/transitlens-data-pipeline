@@ -1,146 +1,123 @@
 import os
-import csv
 import logging
-import numpy as np
 import pandas as pd
+from real_tess.sector_manifest import update_manifest_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-def download_sector_data(sector=78, target_ids=None, limit=50, raw_dir=None):
+def download_manifest_targets(manifest_path, limit=None, cache_dir="real_tess/cache"):
     """
-    Downloads raw TESS high-cadence FITS files for a selected sector from MAST using lightkurve.
-    Keeps tracking in datasets/tess_sector_manifest.csv.
+    Downloads raw TESS high-cadence FITS files for pending targets in the manifest.
+    Updates status in manifest_path.
     """
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if raw_dir is None:
-        raw_dir = os.path.join(repo_root, "data", "raw", "tess", f"sector_{sector}")
-    os.makedirs(raw_dir, exist_ok=True)
+    if not os.path.exists(manifest_path):
+        logger.error(f"Manifest file missing: {manifest_path}")
+        return
+        
+    df = pd.read_csv(manifest_path)
+    os.makedirs(cache_dir, exist_ok=True)
     
-    manifest_path = os.path.join(repo_root, "transitlens-data-pipeline", "datasets", "tess_sector_manifest.csv")
-    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-    
-    # Load manifest if exists, to allow resumes
-    manifest = {}
-    if os.path.exists(manifest_path):
-        try:
-            df_m = pd.read_csv(manifest_path)
-            for _, row in df_m.iterrows():
-                manifest[str(row["target_id"])] = {
-                    "sector": int(row["sector"]),
-                    "cadence": str(row["cadence"]),
-                    "source_product": str(row["source_product"]),
-                    "file_path": str(row["file_path"]),
-                    "download_status": str(row["download_status"]),
-                    "failure_reason": str(row["failure_reason"]) if pd.notnull(row["failure_reason"]) else ""
-                }
-        except Exception as e:
-            logger.warning("Could not load existing manifest: %s. Recreating.", e)
-            
-    # Resolve target IDs from Sector 78 stats file if none provided
-    if target_ids is None:
-        stats_path = os.path.join(repo_root, "archive", "tess s0078-s0078_tcestats.csv")
-        if os.path.exists(stats_path):
-            df_stats = pd.read_csv(stats_path)
-            # Pick a subset of target IDs
-            target_ids = df_stats["ticid"].unique()[:limit].tolist()
-        else:
-            target_ids = []
-            
-    logger.info("Starting TESS sector %d download for %d targets...", sector, len(target_ids))
+    # Get pending targets
+    pending_targets = df[df["status"] == "pending"]
+    if len(pending_targets) == 0:
+        logger.info("No pending downloads in manifest.")
+        return
+        
+    logger.info(f"Starting downloads for {len(pending_targets)} pending targets (limit={limit})...")
     
     try:
         import lightkurve as lk
     except ImportError:
-        logger.error("lightkurve package not found. In offline/mock mode.")
-        # Simulated/mock mode if lightkurve is missing (e.g. offline CI)
-        for tid in target_ids:
-            tic_str = f"TIC-{tid}"
-            if tic_str in manifest and manifest[tic_str]["download_status"] == "success":
-                continue
-            manifest[tic_str] = {
-                "sector": sector,
-                "cadence": "2-minute",
-                "source_product": "SPOC",
-                "file_path": os.path.join(raw_dir, f"TIC{tid}_sector{sector:03d}.fits"),
-                "download_status": "success" if np.random.random() > 0.1 else "failed",
-                "failure_reason": ""
-            }
-        _write_manifest(manifest, manifest_path)
-        return manifest
+        logger.error("lightkurve package not found. Skipping downloads (offline/fallback mode).")
+        # Mark all pending targets as failed
+        for _, row in pending_targets.iterrows():
+            update_manifest_status(manifest_path, row["target_id"], "failed", "lightkurve package missing")
+        return
+
+    download_count = 0
+    for _, row in pending_targets.iterrows():
+        if limit and download_count >= limit:
+            logger.info("Reached limit of downloads. Stopping.")
+            break
+            
+        target_id = row["target_id"]
+        tic_id = row["tic_id"]
+        sector = int(row["sector"])
         
-    for tid in target_ids:
-        tic_str = f"TIC-{tid}"
-        # Skip if already downloaded successfully
-        if tic_str in manifest and manifest[tic_str]["download_status"] == "success" and os.path.exists(manifest[tic_str]["file_path"]):
-            logger.info("Target %s already downloaded, skipping.", tic_str)
+        # Verify cached file doesn't already exist
+        local_filename = f"TIC{tic_id}_sector{sector:03d}.fits"
+        local_path = os.path.join(cache_dir, local_filename)
+        
+        if os.path.exists(local_path):
+            logger.info(f"Target {target_id} already cached locally. Updating manifest.")
+            df.loc[df["target_id"] == target_id, "status"] = "cached"
+            df.loc[df["target_id"] == target_id, "local_fits_path"] = local_path
+            df.loc[df["target_id"] == target_id, "failure_reason"] = ""
+            df.to_csv(manifest_path, index=False)
             continue
             
-        logger.info("Searching for %s in sector %d...", tic_str, sector)
+        logger.info(f"Searching MAST for {target_id} in sector {sector}...")
         try:
-            search_result = lk.search_lightcurve(f"TIC {tid}", sector=sector, mission="TESS")
+            search_result = lk.search_lightcurve(f"TIC {tic_id}", sector=sector, mission="TESS")
             if len(search_result) == 0:
-                raise ValueError(f"No light curves found for TIC {tid} in sector {sector}")
+                raise ValueError(f"No light curves found for TIC {tic_id} in sector {sector}")
                 
-            # Filter for 2-minute cadence if available
+            # Prefer SPOC 2-minute cadence (exptime = 120.0s)
             best_idx = 0
-            best_exptime = 100000.0
-            for i, row in enumerate(search_result.table):
-                exptime = float(row["exptime"])
-                if exptime < best_exptime:
-                    best_exptime = exptime
+            best_exptime = 120.0
+            found_preferred = False
+            for i, r in enumerate(search_result.table):
+                exptime = float(r["exptime"]) if pd.notna(r["exptime"]) else 120.0
+                if abs(exptime - 120.0) < 1.0:
                     best_idx = i
-                    
+                    best_exptime = exptime
+                    found_preferred = True
+                    break
+            if not found_preferred:
+                # Fall back to any cadence closest to 120.0s
+                best_diff = 100000.0
+                for i, r in enumerate(search_result.table):
+                    exptime = float(r["exptime"]) if pd.notna(r["exptime"]) else 120.0
+                    diff = abs(exptime - 120.0)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_exptime = exptime
+                        best_idx = i
+                        
             target_row = search_result[best_idx]
-            cadence_min = round(best_exptime / 60.0, 2)
-            cadence_str = f"{cadence_min}-minute"
+            logger.info(f"Downloading {target_id} (exptime={best_exptime}s)...")
             
-            logger.info("Downloading %s (cadence = %s)...", tic_str, cadence_str)
-            lc = target_row.download()
+            # Retry download on timeout/failure
+            lc = None
+            for attempt in range(2):
+                try:
+                    lc = target_row.download()
+                    break
+                except Exception as exc:
+                    if attempt == 1:
+                        raise exc
+                    logger.warning(f"Download attempt {attempt+1} failed for {target_id}, retrying...")
+                    
+            if lc is None:
+                raise ValueError("Download returned None")
+                
+            lc.to_fits(local_path, overwrite=True)
+            logger.info(f"Successfully saved {target_id} FITS to {local_path}")
             
-            file_name = f"TIC{tid}_sector{sector:03d}.fits"
-            file_path = os.path.join(raw_dir, file_name)
-            lc.to_fits(file_path, overwrite=True)
+            df.loc[df["target_id"] == target_id, "status"] = "downloaded"
+            df.loc[df["target_id"] == target_id, "local_fits_path"] = local_path
+            df.loc[df["target_id"] == target_id, "failure_reason"] = ""
+            df.to_csv(manifest_path, index=False)
+            download_count += 1
             
-            manifest[tic_str] = {
-                "sector": sector,
-                "cadence": cadence_str,
-                "source_product": target_row.table["author"][0] if "author" in target_row.table.colnames else "SPOC",
-                "file_path": file_path,
-                "download_status": "success",
-                "failure_reason": ""
-            }
         except Exception as e:
-            logger.warning("Failed to download %s: %s", tic_str, e)
-            manifest[tic_str] = {
-                "sector": sector,
-                "cadence": "unknown",
-                "source_product": "unknown",
-                "file_path": "",
-                "download_status": "failed",
-                "failure_reason": str(e)
-            }
+            logger.warning(f"Failed to download {target_id}: {e}")
+            df.loc[df["target_id"] == target_id, "status"] = "failed"
+            df.loc[df["target_id"] == target_id, "failure_reason"] = str(e)
+            df.to_csv(manifest_path, index=False)
             
-        # Write manifest incrementally
-        _write_manifest(manifest, manifest_path)
-        
-    logger.info("Download process completed.")
-    return manifest
-
-def _write_manifest(manifest, manifest_path):
-    rows = []
-    for tid, info in manifest.items():
-        rows.append({
-            "target_id": tid,
-            "sector": info["sector"],
-            "cadence": info["cadence"],
-            "source_product": info["source_product"],
-            "file_path": info["file_path"],
-            "download_status": info["download_status"],
-            "failure_reason": info["failure_reason"]
-        })
-    df = pd.DataFrame(rows)
-    df.to_csv(manifest_path, index=False)
+    logger.info("Download sequence completed.")
 
 if __name__ == "__main__":
-    download_sector_data(sector=78, limit=5)
+    download_manifest_targets("sector_manifest.csv", limit=5)

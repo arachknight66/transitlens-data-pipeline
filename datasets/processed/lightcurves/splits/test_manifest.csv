@@ -1,0 +1,2 @@
+target_id,class_label,source,evidence_level,lightcurve_path,true_period_days,true_depth,true_duration_days
+candidate_a,exoplanet_transit,synthetic,synthetic,candidate_a.npz,3.42,0.013,0.16

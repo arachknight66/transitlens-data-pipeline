@@ -1,0 +1,2 @@
+sector,n_targets_requested,n_targets_with_products,n_downloaded,n_cached,n_parsed,n_processed,n_screened,n_failed_download,n_failed_parse,n_failed_pipeline,mean_points_per_lightcurve,median_points_per_lightcurve,mean_time_span_days,median_time_span_days,created_at
+98,9,9,0,0,9,9,9,0,0,0,59724.46153846154,28219.0,56.60888015201887,57.37234555407531,2026-06-26T14:16:09.509418+00:00

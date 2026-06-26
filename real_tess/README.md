@@ -88,3 +88,18 @@ copied over), subsequent calls are fully offline.
   real TESS targets unless explicitly passed in via `config` — this pipeline
   does not infer ground truth from MAST. See `interface.py`'s `_load_tess()`
   for the optional override keys.
+
+## Sector Ingestion and Screening (Phase 2)
+
+Phase 2 introduces automated ingestion and screening of full/sub-sectors:
+* `sector_manifest.py`: Builds a manifest of observations matching a TESS sector and cadence from MAST (or local cache files).
+* `sector_downloader.py`: Downloads pending FITS files from MAST using Lightkurve (prioritizing 120-second cadence).
+* `sector_processor.py`: Parses downloaded FITS files and outputs Phase 1-compliant `.npz` arrays (cleaning NaN/Inf/quality-flag points, normalising by median).
+* `sector_screening.py`: Iterates over the preprocessed arrays, runs the detection and classification models, and generates summary CSVs and a screening report.
+
+### Run Screening Workflow
+From `transitlens-ml-core`:
+```bash
+python -m eval.run_sector_screening --sector 98 --limit 100 --download
+```
+Outputs are written to `transitlens-data-pipeline/datasets/processed/tess_sector/`.

@@ -90,9 +90,9 @@ Every call to `load_light_curve()` returns this exact shape:
 
 | Case | Label | Description |
 |---|---|---|
-| `candidate_a` | `exoplanet_like` | Shallow periodic transit, flat bottom, 1.3% depth |
-| `candidate_b` | `eclipsing_binary_like` | Deep V-shaped primary + secondary eclipse, 18% depth |
-| `candidate_c` | `noise_or_other` | No transit — red noise + stellar variability |
+| `candidate_a` | `exoplanet_transit` | Shallow periodic transit, flat bottom, 1.3% depth |
+| `candidate_b` | `eclipsing_binary` | Deep V-shaped primary + secondary eclipse, 18% depth |
+| `candidate_c` | `stellar_variability_or_other` | No transit — red noise + stellar variability |
 
 ## License
 

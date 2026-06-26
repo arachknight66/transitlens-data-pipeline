@@ -1,0 +1,5 @@
+target_id,class_label,source,evidence_level,lightcurve_path,true_period_days,true_depth,true_duration_days
+candidate_c,stellar_variability_or_other,synthetic,synthetic,candidate_c.npz,,,
+TIC-237913194,exoplanet_transit,real_tess,real_tess,TIC-237913194.npz,15.1689723,0.0078185475582,0.08597214583333333
+TIC-25155310,exoplanet_transit,real_tess,real_tess,TIC-25155310.npz,3.2887898,0.0070057247902,0.14319882083333332
+TIC-307210830,exoplanet_transit,real_tess,real_tess,TIC-307210830.npz,3.6906759,0.001657,0.046125
