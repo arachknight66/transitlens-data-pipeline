@@ -89,11 +89,11 @@ def test_tess_source_without_lightkurve_raises_import_error():
 
 
 def test_candidate_labels_match_expected():
-    # ground-truth labels should match synthetic/config.yaml
+    # ground-truth labels should match synthetic/config.yaml after mapping
     expected = {
-        "candidate_a": "exoplanet_like",
-        "candidate_b": "eclipsing_binary_like",
-        "candidate_c": "noise_or_other",
+        "candidate_a": "exoplanet_transit",
+        "candidate_b": "eclipsing_binary",
+        "candidate_c": "stellar_variability_or_other",
     }
     for target_id, label in expected.items():
         result = load_light_curve("synthetic", target_id)

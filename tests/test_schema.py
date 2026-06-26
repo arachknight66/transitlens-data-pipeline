@@ -28,7 +28,15 @@ REQUIRED_COLUMNS = [
 
 REQUIRED_NON_NULL_COLUMNS = ["target_id", "time", "flux", "source", "cadence_min"]
 
-VALID_LABELS = {"exoplanet_like", "eclipsing_binary_like", "noise_or_other"}
+VALID_LABELS = {
+    "exoplanet_transit",
+    "eclipsing_binary",
+    "blend_contamination",
+    "stellar_variability_or_other",
+    "exoplanet_like",
+    "eclipsing_binary_like",
+    "noise_or_other",
+}
 
 
 @pytest.fixture(scope="module")

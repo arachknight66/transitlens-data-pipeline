@@ -43,7 +43,21 @@ import yaml
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 _VALID_SOURCES = ("synthetic", "tess", "csv", "fits")
-_VALID_LABELS = {"exoplanet_like", "eclipsing_binary_like", "noise_or_other"}
+_VALID_LABELS = {
+    "exoplanet_transit",
+    "eclipsing_binary",
+    "blend_contamination",
+    "stellar_variability_or_other",
+    "exoplanet_like",
+    "eclipsing_binary_like",
+    "noise_or_other",
+}
+
+_ALIAS_MAP = {
+    "exoplanet_like": "exoplanet_transit",
+    "eclipsing_binary_like": "eclipsing_binary",
+    "noise_or_other": "stellar_variability_or_other",
+}
 
 
 # ─────────────────────────────────────────────
@@ -401,11 +415,14 @@ def _build_result(time, flux, target_id, source, metadata):
         raise InvalidSourceError(f"Unknown source: {source!r}. Must be one of {_VALID_SOURCES}.")
 
     label = metadata.get("label")
-    if label is not None and label not in _VALID_LABELS:
-        raise InvalidLabelError(
-            f"Invalid label '{label}' for '{target_id}'. "
-            f"Must be one of {sorted(_VALID_LABELS)} or None."
-        )
+    if label is not None:
+        label = _ALIAS_MAP.get(label, label)
+        metadata["label"] = label
+        if label not in _VALID_LABELS:
+            raise InvalidLabelError(
+                f"Invalid label '{label}' for '{target_id}'. "
+                f"Must be one of {sorted(_VALID_LABELS)} or None."
+            )
 
     return {
         "time": time,
