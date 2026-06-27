@@ -57,12 +57,67 @@ def audit_archive(toi_path, tce_path):
     
     return toi_df, tce_df
 
+def save_manifest_atomically(df, dest_path):
+    dest_path = Path(dest_path)
+    dest_dir = dest_path.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    temp_path = dest_dir / f"temp_{dest_path.name}"
+    df.to_parquet(temp_path, index=False)
+    
+    try:
+        # Validate readability
+        pd.read_parquet(temp_path)
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise RuntimeError(f"Manifest Parquet validation failed after write: {e}")
+        
+    os.replace(str(temp_path), str(dest_path))
+    print(f"Saved manifest atomically to {dest_path}")
+
+def split_tics_stratified(class_to_tics, seed=42):
+    rng = np.random.default_rng(seed)
+    train_tics, val_tics, test_tics = [], [], []
+    
+    for cls, tics_list in class_to_tics.items():
+        tics_arr = np.array(tics_list)
+        rng.shuffle(tics_arr)
+        n = len(tics_arr)
+        
+        if n == 0:
+            continue
+        elif n == 1:
+            train_tics.append(tics_arr[0])
+        elif n == 2:
+            train_tics.append(tics_arr[0])
+            val_tics.append(tics_arr[1])
+        else:
+            n_val = max(1, int(np.round(0.15 * n)))
+            n_test = max(1, int(np.round(0.15 * n)))
+            n_train = n - n_val - n_test
+            
+            if n_train <= 0:
+                n_train = 1
+                n_val = 1
+                n_test = n - 2
+                
+            train_tics.extend(tics_arr[:n_train])
+            val_tics.extend(tics_arr[n_train:n_train+n_val])
+            test_tics.extend(tics_arr[n_train+n_val:n_train+n_val+n_test])
+            
+            if n_train + n_val + n_test < n:
+                train_tics.extend(tics_arr[n_train+n_val+n_test:])
+                
+    return set(train_tics), set(val_tics), set(test_tics)
+
 def main():
     parser = argparse.ArgumentParser(description="Build TESS Training Targets Manifest")
     parser.add_argument("--archive", required=True, help="Path to main TOI labels CSV")
     parser.add_argument("--tce", required=True, help="Path to TCE stats CSV")
     parser.add_argument("--output", required=True, help="Path to write the Parquet manifest")
     parser.add_argument("--label-policy", required=True, help="Path to label policy YAML")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for split reproducibility")
     args = parser.parse_args()
     
     # Ensure directories exist
@@ -139,7 +194,6 @@ def main():
         # Get Candidate number
         toi_id = str(row.get("toi", ""))
         try:
-            # e.g. "1000.01" -> candidate 1
             candidate_id = int(float(toi_id.split(".")[-1]))
         except (ValueError, IndexError):
             candidate_id = 1
@@ -153,11 +207,8 @@ def main():
                 matched_tce = t
                 break
         if matched_tce is None and len(tce_list) > 0:
-            # If no plant number match, default to first TCE
             matched_tce = tce_list[0]
             
-        # Determine parameters
-        # Duration: convert hours to days
         duration_hours = float(row.get("pl_trandurh", 0.0)) if pd.notnull(row.get("pl_trandurh")) else 0.0
         duration_days = duration_hours / 24.0
         
@@ -166,7 +217,6 @@ def main():
         
         sector = None
         if matched_tce is not None:
-            # If we matched Sector 78 event stats
             sector = 78
             
         record = {
@@ -186,96 +236,92 @@ def main():
             "duration_days": duration_days,
             "depth_ppm": depth_ppm,
             "download_status": "pending",
+            "processing_status": "pending",
             "data_product": "SPOC",
             "raw_fits_path": "",
             "processed_path": "",
             "failure_reason": "",
             "attempt_count": 0,
             "download_timestamp": "",
-            "checksum": ""
+            "checksum": "",
+            "cutout_size": 15,
+            "aperture_version": "connected_threshold_v1.0"
         }
         processed_records.append(record)
         
     df_processed = pd.DataFrame(processed_records)
     print(f"Total processed candidates before deduplication: {len(df_processed)}")
     
-    # 4. Deduplicate by TIC and Candidate with Conflict Resolution
+    # 4. Deduplicate by TIC and resolve label conflicts
     deduped_records = []
     if len(df_processed) > 0:
-        # Group by (tic_id, candidate_id)
-        grouped = df_processed.groupby(["tic_id", "candidate_id"])
         strength_val = {"strong": 3, "medium": 2, "weak": 1, "none": 0}
         
-        for name, group in grouped:
-            if len(group) == 1:
-                deduped_records.append(group.iloc[0].to_dict())
+        # Group by tic_id
+        grouped_tic = df_processed.groupby("tic_id")
+        for tic_val, group in grouped_tic:
+            unique_classes = group["class_label"].unique()
+            if len(unique_classes) == 1:
+                # No conflict, append all candidates of this TIC
+                for _, r in group.iterrows():
+                    deduped_records.append(r.to_dict())
             else:
-                # Sort by strength
+                # Conflict exists: resolve using strength (strong > medium > weak)
                 group = group.copy()
                 group["strength_score"] = group["label_strength"].map(strength_val)
-                group = group.sort_values(by="strength_score", ascending=False)
+                max_strength = group["strength_score"].max()
                 
-                # Check for contradictions among the highest-strength entries
-                best_strength = group.iloc[0]["strength_score"]
-                best_entries = group[group["strength_score"] == best_strength]
+                # Filter to only highest-strength rows
+                best_entries = group[group["strength_score"] == max_strength]
+                best_classes = best_entries["class_label"].unique()
                 
-                unique_labels = best_entries["class_label"].unique()
-                if len(unique_labels) > 1:
-                    # Contradictory classes at same strength level: exclude the target!
-                    exclusions.append({
-                        "tic_id": int(name[0]),
-                        "toi": str(group.iloc[0]["toi"]),
-                        "reason": f"Contradictory labels {list(unique_labels)} for same target",
-                        "source_row": int(group.iloc[0]["source_row"])
-                    })
+                if len(best_classes) > 1:
+                    # Contradictory classes at max strength: exclude the entire TIC
+                    for _, r in group.iterrows():
+                        exclusions.append({
+                            "tic_id": int(tic_val),
+                            "toi": str(r.get("toi")),
+                            "reason": f"Contradictory classes {list(best_classes)} at strength {max_strength} for TIC {tic_val}",
+                            "source_row": int(r.get("source_row"))
+                        })
                 else:
-                    deduped_records.append(best_entries.iloc[0].drop("strength_score").to_dict())
-                    
+                    # Successfully resolved to best_classes[0]
+                    resolved_class = best_classes[0]
+                    # Keep only candidates matching the resolved class, exclude the weaker contradicting ones
+                    for _, r in group.iterrows():
+                        if r["class_label"] == resolved_class:
+                            deduped_records.append(r.drop("strength_score").to_dict())
+                        else:
+                            exclusions.append({
+                                "tic_id": int(tic_val),
+                                "toi": str(r.get("toi")),
+                                "reason": f"Excluded weaker contradicting class '{r['class_label']}' resolved to '{resolved_class}'",
+                                "source_row": int(r.get("source_row"))
+                            })
+                            
     df_deduped = pd.DataFrame(deduped_records)
-    print(f"Total candidates after deduplication: {len(df_deduped)}")
+    print(f"Total candidates after deduplication & TIC-level resolution: {len(df_deduped)}")
     
     # 5. Split before downloading, grouping by tic_id
     if len(df_deduped) > 0:
-        # Group split by tic_id to prevent leakage
         unique_tics = df_deduped["tic_id"].unique()
         
-        # Build representative class for stratification
+        # Build representative class for stratification (all candidates of a TIC have same class now)
         tic_repr_class = {}
         for tic in unique_tics:
-            tic_rows = df_deduped[df_deduped["tic_id"] == tic]
-            # Prioritize exoplanet_transit for stratification
-            classes = tic_rows["class_label"].tolist()
-            if "exoplanet_transit" in classes:
-                tic_repr_class[tic] = "exoplanet_transit"
-            else:
-                tic_repr_class[tic] = classes[0]
-                
-        # Split unique tics stratified by representative class
-        rng = np.random.default_rng(42)
-        train_tics, val_tics, test_tics = [], [], []
-        
-        # Group tics by class
+            tic_repr_class[tic] = df_deduped[df_deduped["tic_id"] == tic]["class_label"].iloc[0]
+            
         class_to_tics = {}
         for tic, cls in tic_repr_class.items():
             class_to_tics.setdefault(cls, []).append(tic)
             
-        for cls, tics_list in class_to_tics.items():
-            tics_arr = np.array(tics_list)
-            rng.shuffle(tics_arr)
-            
-            n = len(tics_arr)
-            n_train = int(0.70 * n)
-            n_val = int(0.15 * n)
-            
-            train_tics.extend(tics_arr[:n_train])
-            val_tics.extend(tics_arr[n_train:n_train+n_val])
-            test_tics.extend(tics_arr[n_train+n_val:])
-            
-        train_set = set(train_tics)
-        val_set = set(val_tics)
-        test_set = set(test_tics)
+        train_set, val_set, test_set = split_tics_stratified(class_to_tics, seed=args.seed)
         
-        # Map split back to targets dataframe
+        # Verify split disjointness
+        assert train_set.isdisjoint(val_set), "Train and Val splits overlap!"
+        assert train_set.isdisjoint(test_set), "Train and Test splits overlap!"
+        assert val_set.isdisjoint(test_set), "Val and Test splits overlap!"
+        
         splits = []
         for idx, row in df_deduped.iterrows():
             tic = row["tic_id"]
@@ -286,9 +332,17 @@ def main():
             elif tic in test_set:
                 splits.append("test")
             else:
-                splits.append("train") # default fallback
+                splits.append("train")
                 
         df_deduped["split"] = splits
+        
+        # Final validation assertions
+        assert not df_deduped["tic_id"].isnull().any(), "Manifest contains rows with null TIC ID!"
+        assert not df_deduped["class_label"].isnull().any(), "Manifest contains rows with null class!"
+        
+        # Verify no TIC has contradictory included labels
+        for tic, group in df_deduped.groupby("tic_id"):
+            assert group["class_label"].nunique() == 1, f"TIC {tic} has multiple contradictory class labels inside manifest!"
     else:
         df_deduped["split"] = []
         
@@ -308,9 +362,8 @@ def main():
     print(f"Exclusions report saved to {exclusions_path}")
     print(f"Total excluded records: {len(exclusions_df)}")
     
-    # Save manifest Parquet
-    df_deduped.to_parquet(args.output, index=False)
-    print(f"Saved manifest to {args.output}")
+    # Save manifest Parquet atomically
+    save_manifest_atomically(df_deduped, args.output)
 
 if __name__ == "__main__":
     main()

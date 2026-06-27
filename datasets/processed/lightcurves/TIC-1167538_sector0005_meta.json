@@ -1,0 +1,32 @@
+{
+  "tic_id": 1167538,
+  "sector": 5,
+  "source_fits_path": "data/raw/tesscut\\TIC1167538_sector0005_15x15.fits",
+  "checksum": "f2ffd4423dc393d04c78059ebc49f02fd5ba021744a69bffe16854f340d67d33",
+  "cutout_size": 15,
+  "aperture_version": "connected_threshold_v1.0",
+  "aperture_pixels": 10,
+  "background_pixels": 210,
+  "is_fallback": false,
+  "quality_bitmask": 17087,
+  "cadence_counts": {
+    "original": 1196,
+    "after_quality": 1173,
+    "retained": 1173,
+    "quality_rejected": 23,
+    "nan_outlier_rejected": 0
+  },
+  "median_flux": 11876.42268371582,
+  "normalization_method": "median_division",
+  "processing_timestamp": "2026-06-27T19:21:37.113784",
+  "scientific_check": {
+    "catalog_period": 0.0,
+    "detected_period": 3.0299676929576207,
+    "catalog_depth_fractional": 0.008735,
+    "detected_depth": 0.00042762040982841597,
+    "is_suspicious": true,
+    "suspicious_reasons": [
+      "detected depth 0.000428 differs from catalog depth 0.008735 by > order of magnitude (ratio 0.05)"
+    ]
+  }
+}
