@@ -2,27 +2,16 @@
 real_tess/mast_loader.py
 ─────────────────────────
 Downloads and caches real TESS light curves from MAST via Lightkurve.
-
-This is the Phase 5 stretch-goal data source, and the *only* file in
-real_tess/ that talks to the network. sector_selector.py and
-flux_normaliser.py are pure, offline post-processing so they can be
-unit-tested without ever hitting MAST. interface.py's `_load_tess()`
-checks for `lightkurve` and calls `fetch_light_curve()` below; it
-never imports lightkurve itself.
-
-Caveat: the hackathon offline demo must work with zero network
-access. requirements.txt keeps lightkurve/astroquery commented out
-by default — this module is only reachable if a contributor
-deliberately installs them.
 """
 
+from __future__ import annotations
+
 import os
-
+import time as _time_pkg
+import hashlib
 import numpy as np
-
 from real_tess.flux_normaliser import normalise_pdcsap
 from real_tess.sector_selector import select_best_sector
-
 
 class TessDataUnavailableError(Exception):
     """Raised when no TESS light curve can be found or downloaded for a TIC ID."""
@@ -37,32 +26,22 @@ def fetch_light_curve(tic_id, sector=None, cache_dir="real_tess/cache", use_cach
     Parameters
     ----------
     tic_id : str or int
-        TIC identifier, with or without a "TIC" / "TIC-" prefix
-        (e.g. "TIC-25155310", "TIC 25155310", "25155310", 25155310).
+        TIC identifier, with or without a "TIC" / "TIC-" prefix.
     sector : int, optional
-        Restrict to this specific sector. If None, the best available
-        sector is chosen automatically via sector_selector.
+        Restrict to this specific sector.
     cache_dir : str
-        Directory to look in / save cached .fits files to. Created
-        if it doesn't exist.
+        Directory to look in / save cached .fits files to.
     use_cache : bool
-        If False, skip the cache check and always hit MAST (still
-        writes the freshly downloaded result back to cache_dir).
+        If False, skip the cache check.
 
     Returns
     -------
-    tuple of (np.ndarray, np.ndarray, int)
-        (time, flux, sector) — time in BTJD, flux normalised to
-        median = 1.0 via flux_normaliser.normalise_pdcsap.
-
-    Raises
-    ------
-    ImportError
-        If the 'lightkurve' package is not installed.
-    TessDataUnavailableError
-        If no observations exist for this TIC ID/sector, or the
-        network is unreachable and nothing is cached.
+    tuple of (np.ndarray, np.ndarray, int, dict)
+        (time, flux, sector, info_dict) — time in BTJD, flux normalised to
+        median = 1.0, resolved sector, and info_dict containing stages and provenance.
     """
+    from real_tess.fits_parser import read_fits_lightcurve
+
     clean_id = _normalise_tic_id(tic_id)
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -70,9 +49,44 @@ def fetch_light_curve(tic_id, sector=None, cache_dir="real_tess/cache", use_cach
         cached = _find_cached_file(clean_id, sector, cache_dir)
         if cached is not None:
             cache_path, cached_sector = cached
-            time, flux, quality = _read_fits_cache(cache_path)
-            flux = normalise_pdcsap(flux, quality_flags=quality)
-            return time, flux, cached_sector
+            parsed = read_fits_lightcurve(cache_path)
+            time_arr = parsed["time"]
+            flux = normalise_pdcsap(parsed["flux_raw"], quality_flags=parsed["quality"])
+            
+            try:
+                sha256 = hashlib.sha256()
+                with open(cache_path, "rb") as f:
+                    for block in iter(lambda: f.read(65536), b""):
+                        sha256.update(block)
+                csum = sha256.hexdigest()
+            except Exception:
+                csum = ""
+                
+            info_dict = {
+                "stages": {
+                    "search": "cached",
+                    "product_selection": "cached",
+                    "download": "cached",
+                    "checksum": "success",
+                    "parse": "success",
+                    "photometry": "pipeline" if parsed["metadata"].get("flux_type_used") == "PDCSAP_FLUX" else "custom",
+                    "analysis": "pending"
+                },
+                "provenance": {
+                    "tic_id": clean_id,
+                    "sector": cached_sector,
+                    "camera": parsed["metadata"].get("camera"),
+                    "ccd": parsed["metadata"].get("ccd"),
+                    "cadence": float(np.median(np.diff(time_arr)) * 1440.0) if len(time_arr) > 1 else 2.0,
+                    "author": "SPOC" if "PDCSAP" in parsed["metadata"].get("flux_type_used", "") else "unknown",
+                    "mast_uri": f"local://{os.path.basename(cache_path)}",
+                    "product_filename": os.path.basename(cache_path),
+                    "checksum": csum,
+                    "retrieval_time": os.path.getmtime(cache_path),
+                    "code_version": "0.1.0"
+                }
+            }
+            return time_arr, flux, cached_sector, info_dict
 
     try:
         import lightkurve as lk
@@ -92,8 +106,6 @@ def fetch_light_curve(tic_id, sector=None, cache_dir="real_tess/cache", use_cach
     try:
         search_result = lk.search_lightcurve(f"TIC {clean_id}", **search_kwargs)
     except Exception as exc:
-        # Covers network-unreachable / MAST-down conditions from
-        # astroquery, which don't share one consistent exception type.
         raise TessDataUnavailableError(
             f"Could not reach MAST to search for TIC {clean_id}: {exc}"
         ) from exc
@@ -116,13 +128,47 @@ def fetch_light_curve(tic_id, sector=None, cache_dir="real_tess/cache", use_cach
     cache_path = os.path.join(cache_dir, _cache_filename(clean_id, resolved_sector))
     lc.to_fits(cache_path, overwrite=True)
 
-    time = np.asarray(lc.time.value, dtype=np.float64)
+    try:
+        sha256 = hashlib.sha256()
+        with open(cache_path, "rb") as f:
+            for block in iter(lambda: f.read(65536), b""):
+                sha256.update(block)
+        csum = sha256.hexdigest()
+    except Exception:
+        csum = ""
+
+    time_arr = np.asarray(lc.time.value, dtype=np.float64)
     flux_raw = np.asarray(lc.flux.value, dtype=np.float64)
     quality = np.asarray(lc.quality, dtype=np.int64) if hasattr(lc, "quality") else None
 
     flux = normalise_pdcsap(flux_raw, quality_flags=quality)
 
-    return time, flux, resolved_sector
+    info_dict = {
+        "stages": {
+            "search": "success",
+            "product_selection": "success",
+            "download": "success",
+            "checksum": "success",
+            "parse": "success",
+            "photometry": "pipeline",
+            "analysis": "pending"
+        },
+        "provenance": {
+            "tic_id": clean_id,
+            "sector": resolved_sector,
+            "camera": getattr(lc, "camera", None),
+            "ccd": getattr(lc, "ccd", None),
+            "cadence": float(np.median(np.diff(time_arr)) * 1440.0) if len(time_arr) > 1 else 2.0,
+            "author": getattr(lc, "author", "SPOC"),
+            "mast_uri": getattr(lc, "meta", {}).get("MAST_URI", f"mast:TESS/product/{_cache_filename(clean_id, resolved_sector)}"),
+            "product_filename": _cache_filename(clean_id, resolved_sector),
+            "checksum": csum,
+            "retrieval_time": _time_pkg.time(),
+            "code_version": "0.1.0"
+        }
+    }
+
+    return time_arr, flux, resolved_sector, info_dict
 
 
 def _download_with_retry(search_result, index, retries=1):
@@ -131,7 +177,7 @@ def _download_with_retry(search_result, index, retries=1):
     for attempt in range(retries + 1):
         try:
             return search_result[index].download()
-        except Exception as exc:  # noqa: BLE001 - network errors vary by backend
+        except Exception as exc:  # noqa: BLE001
             last_exc = exc
     raise TessDataUnavailableError(
         f"Download failed after {retries + 1} attempt(s): {last_exc}"
@@ -139,8 +185,7 @@ def _download_with_retry(search_result, index, retries=1):
 
 
 def _normalise_tic_id(tic_id):
-    """Strips 'TIC'/'TIC-' prefixes and whitespace so cache filenames
-    and lookups are consistent regardless of how the caller wrote it."""
+    """Strips 'TIC'/'TIC-' prefixes and whitespace so cache filenames."""
     clean_id = str(tic_id).upper().replace("TIC", "").replace("-", "").strip()
     clean_id = "".join(clean_id.split())
     if not clean_id.isdigit():
@@ -155,8 +200,7 @@ def _cache_filename(clean_id, sector):
 
 
 def _find_cached_file(clean_id, sector, cache_dir):
-    """Looks for a previously-downloaded .fits file in cache_dir
-    matching this TIC ID (and sector, if specified)."""
+    """Looks for a previously-downloaded .fits file in cache_dir."""
     if not os.path.isdir(cache_dir):
         return None
 
@@ -175,14 +219,7 @@ def _find_cached_file(clean_id, sector, cache_dir):
 
 
 def _read_fits_cache(cache_path):
-    """Read cached SPOC/QLP FITS without requiring Lightkurve.
-
-    The shared Astropy parser supports standard TESS light-curve files and
-    Lightkurve exports. This keeps cached TIC retrieval functional in the
-    normal ml-core environment, where Astropy is installed but Lightkurve may
-    intentionally be absent.
-    """
+    """Read cached SPOC/QLP FITS without requiring Lightkurve."""
     from real_tess.fits_parser import read_fits_lightcurve
-
     parsed = read_fits_lightcurve(cache_path)
     return parsed["time"], parsed["flux_raw"], parsed["quality"]

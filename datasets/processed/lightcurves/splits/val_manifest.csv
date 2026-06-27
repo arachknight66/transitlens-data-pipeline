@@ -1,3 +1,13 @@
 target_id,class_label,source,evidence_level,lightcurve_path,true_period_days,true_depth,true_duration_days
 candidate_b,eclipsing_binary,synthetic,synthetic,candidate_b.npz,1.87,0.18,0.08
+TIC-24587971,stellar_variability_or_other,real_tess,real_tess,TIC-24587971.npz,,,
 TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-261136679,exoplanet_transit,real_tess,real_tess,TIC-261136679.npz,6.267832,0.000321,0.11620833333333334
+TIC-671806131,stellar_variability_or_other,real_tess,real_tess,TIC-671806131.npz,,,

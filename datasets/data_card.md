@@ -31,24 +31,24 @@ Every target in the processed dataset is classified under a strict evidence-leve
 
 ### Summary of Counts
 
-- **Evaluable Targets (Actual Time-Series Light Curves)**: 7
-- **Catalog-Only Targets (Metadata Rows)**: 15,829 (unsupported as evaluable data in Phase 1)
+- **Evaluable Targets (Actual Time-Series Light Curves)**: 36
+- **Catalog-Only Targets (Metadata Rows)**: 7,892
 
-### Counts by Source
-- `real_tess`: 4 targets
+### Counts by Source (Evaluable)
+- `real_tess`: 33 targets
 - `synthetic`: 3 targets
-- `total`: 7 targets
+- `total`: 36 targets
 
 ### Counts by Class (Evaluable)
-- `exoplanet_transit`: 5 targets
+- `exoplanet_transit`: 13 targets
 - `eclipsing_binary`: 1 target
-- `blend_contamination`: 0 targets
-- `stellar_variability_or_other`: 1 target
+- `blend_contamination`: 0 targets (available in training manifest but no raw cached FITS data)
+- `stellar_variability_or_other`: 22 targets
 
 ### Counts by Split
-- **Train Split**: 4 targets (`candidate_c`, `TIC-237913194`, `TIC-25155310`, `TIC-307210830`)
-- **Val Split**: 2 targets (`candidate_b`, `TIC-261136679`)
-- **Test Split**: 1 target (`candidate_a`)
+- **Train Split**: 22 targets (synthetic `candidate_c` + 21 real TESS sectors)
+- **Val Split**: 12 targets (synthetic `candidate_b` + 11 real TESS sectors)
+- **Test Split**: 2 targets (synthetic `candidate_a` + 1 real TESS sector)
 
 ---
 

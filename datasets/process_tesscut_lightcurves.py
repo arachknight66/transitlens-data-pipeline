@@ -79,6 +79,10 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
     Returns a dict containing:
         time, raw_flux, background_flux, corrected_flux, flux, flux_err, quality, centroid_x, centroid_y, aperture_mask, background_mask, metadata
     """
+    from astropy.wcs import WCS
+    from astropy.coordinates import SkyCoord
+    from scipy.ndimage import median_filter
+
     with fits.open(tpf_path, memmap=False) as hdul:
         tpf_table = hdul[1].data
         time = np.array(tpf_table["TIME"], dtype=np.float64)
@@ -101,25 +105,51 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
         flux_cube = flux_cube[valid_mask]
         flux_err_cube = flux_err_cube[valid_mask]
         quality = quality[valid_mask]
-        
-    # Estimate median image from quality-filtered frames
-    median_img = np.nanmedian(flux_cube, axis=0)
-    height, width = median_img.shape
-    cy, cx = height // 2, width // 2
-    
+
+        # Estimate median image from quality-filtered frames
+        median_img = np.nanmedian(flux_cube, axis=0)
+        height, width = median_img.shape
+        cy, cx = height // 2, width // 2
+
+        # 4. Target localization using WCS coordinates
+        try:
+            # WCS coordinates are typically defined in HDU 2 (APERTURE) or HDU 1
+            wcs_hdu_idx = 2 if len(hdul) > 2 and isinstance(hdul[2], fits.ImageHDU) else 1
+            wcs = WCS(hdul[wcs_hdu_idx].header)
+            ra_obj = hdul[0].header.get("RA_OBJ") or hdul[wcs_hdu_idx].header.get("RA_OBJ")
+            dec_obj = hdul[0].header.get("DEC_OBJ") or hdul[wcs_hdu_idx].header.get("DEC_OBJ")
+            if ra_obj is not None and dec_obj is not None:
+                px_x, px_y = wcs.world_to_pixel(SkyCoord(ra_obj, dec_obj, unit="deg"))
+                cx_targ = int(np.round(px_x))
+                cy_targ = int(np.round(px_y))
+                if 0 <= cx_targ < width and 0 <= cy_targ < height:
+                    cx, cy = cx_targ, cy_targ
+                    logger.info(f"Target localized using WCS at pixel (x={cx}, y={cy}) from RA={ra_obj}, Dec={dec_obj}")
+                else:
+                    logger.warning(f"Target WCS coordinates (x={cx_targ}, y={cy_targ}) out of bounds, using center.")
+        except Exception as e:
+            logger.warning(f"Target WCS localization failed: {e}. Falling back to central pixel.")
+
+        # Extract pipeline aperture mask if present (Bit 2/value 2 is pipeline mask)
+        pipeline_mask = np.zeros((height, width), dtype=bool)
+        try:
+            if len(hdul) > 2 and isinstance(hdul[2], fits.ImageHDU):
+                pipeline_mask = (hdul[2].data & 2) > 0
+        except Exception as e:
+            logger.warning(f"Failed to read pipeline aperture mask: {e}")
+
     img_median = np.nanmedian(median_img)
     img_std = np.nanstd(median_img)
     threshold = img_median + 1.5 * img_std
     
-    aperture_mask = np.zeros((height, width), dtype=bool)
-    
-    # BFS to find connected pixels containing the central source
+    # Strategy A: Connected Threshold (BFS mask around target pixel)
+    connected_threshold_mask = np.zeros((height, width), dtype=bool)
     queue = [(cy, cx)]
     visited = set([(cy, cx)])
     while queue:
         y, x = queue.pop(0)
         if median_img[y, x] >= threshold or (y == cy and x == cx):
-            aperture_mask[y, x] = True
+            connected_threshold_mask[y, x] = True
             for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 ny, nx = y + dy, x + dx
                 if 0 <= ny < height and 0 <= nx < width:
@@ -127,16 +157,40 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
                         visited.add((ny, nx))
                         queue.append((ny, nx))
                         
-    # Centered 3x3 fallback if aperture is too small
+    # Fallback if connected threshold aperture is too small
     is_fallback = False
-    if np.sum(aperture_mask) < 3:
-        aperture_mask = np.zeros((height, width), dtype=bool)
-        aperture_mask[max(0, cy-1):min(height, cy+2), max(0, cx-1):min(width, cx+2)] = True
+    if np.sum(connected_threshold_mask) < 3:
+        connected_threshold_mask = np.zeros((height, width), dtype=bool)
+        connected_threshold_mask[max(0, cy-1):min(height, cy+2), max(0, cx-1):min(width, cx+2)] = True
         is_fallback = True
         
+    # Strategy B: Circular Aperture (radius of 2.5 pixels around cx, cy)
+    circular_mask = np.zeros((height, width), dtype=bool)
+    for y_px in range(height):
+        for x_px in range(width):
+            if (x_px - cx) ** 2 + (y_px - cy) ** 2 <= 2.5 ** 2:
+                circular_mask[y_px, x_px] = True
+                
+    # Strategy C: Threshold Aperture (all pixels > threshold)
+    threshold_mask = median_img >= threshold
+    if np.sum(threshold_mask) < 3:
+        threshold_mask = connected_threshold_mask.copy()
+
+    # Fallback for pipeline mask if empty
+    if np.sum(pipeline_mask) < 3:
+        pipeline_mask = connected_threshold_mask.copy()
+
+    # Use connected_threshold_mask as default aperture_mask
+    aperture_mask = connected_threshold_mask
+    
     # Exclude bright source pixels from the background mask
     background_mask = (~aperture_mask) & (median_img < img_median + 1.0 * img_std)
+    if np.sum(background_mask) < 10:
+        # fallback background mask
+        background_mask = (~aperture_mask)
+        
     background_pixel_count = int(np.sum(background_mask))
+    aperture_pixel_count = int(np.sum(aperture_mask))
     
     raw_flux = []
     background_flux = []
@@ -146,7 +200,6 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
     centroid_y = []
     
     y_coords, x_coords = np.where(aperture_mask)
-    aperture_pixel_count = int(np.sum(aperture_mask))
     
     for t in range(len(time)):
         frame = flux_cube[t]
@@ -211,7 +264,65 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
     normalized_err = flux_err / median_val
     
     fraction_retained = len(time) / original_cadence_count
-    
+
+    # Helper function to compute robust RMS (from MAD)
+    def compute_robust_rms(arr):
+        if len(arr) == 0:
+            return 999.0
+        med = np.median(arr)
+        mad = np.median(np.abs(arr - med))
+        return float(1.4826 * mad / med) if med > 0 else 999.0
+
+    # Helper function to estimate CDPP-like noise
+    def estimate_cdpp(arr):
+        if len(arr) < 13:
+            return 999.0
+        detrended = arr - median_filter(arr, size=13)
+        return float(np.std(detrended))
+
+    # Evaluate multiple aperture strategies
+    aperture_comparison = {}
+    for name, mask in [
+        ("connected_threshold", connected_threshold_mask),
+        ("circular", circular_mask),
+        ("threshold", threshold_mask),
+        ("pipeline", pipeline_mask)
+    ]:
+        if np.sum(mask) > 0:
+            strat_pixel_count = int(np.sum(mask))
+            strat_c_flux = []
+            for t in range(len(flux_cube)):
+                if not valid_mask[t]:
+                    continue
+                frame = flux_cube[t]
+                bg_level = np.nanmedian(frame[background_mask])
+                if not np.isfinite(bg_level):
+                    bg_level = 0.0
+                strat_c_flux.append(np.nansum(frame[mask] - bg_level))
+            strat_c_flux = np.array(strat_c_flux)[valid_points]
+            aperture_comparison[name] = {
+                "pixel_count": strat_pixel_count,
+                "robust_rms": compute_robust_rms(strat_c_flux),
+                "cdpp_ppm": estimate_cdpp(strat_c_flux) * 1e6
+            }
+        else:
+            aperture_comparison[name] = {
+                "pixel_count": 0,
+                "robust_rms": 999.0,
+                "cdpp_ppm": 999999.0
+            }
+
+    # Centroid stability
+    centroid_stability = {
+        "std_x": float(np.std(centroid_x)),
+        "std_y": float(np.std(centroid_y))
+    }
+
+    # Background contamination ratio (median bg flux divided by median raw target flux)
+    med_bg = np.median(background_flux)
+    med_raw = np.median(raw_flux)
+    contamination_ratio = float(med_bg / med_raw) if med_raw > 0 else 0.0
+
     metadata = {
         "aperture_pixels": aperture_pixel_count,
         "background_pixels": background_pixel_count,
@@ -225,7 +336,12 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
             "quality_rejected": quality_rejected_count,
             "nan_outlier_rejected": nan_outlier_rejected_count
         },
-        "fraction_retained": float(fraction_retained)
+        "fraction_retained": float(fraction_retained),
+        "robust_rms": compute_robust_rms(corrected_flux),
+        "cdpp_ppm": estimate_cdpp(corrected_flux) * 1e6,
+        "centroid_stability": centroid_stability,
+        "contamination_ratio": contamination_ratio,
+        "aperture_comparison": aperture_comparison
     }
     
     return {
@@ -241,7 +357,13 @@ def perform_aperture_photometry(tpf_path, cutout_size=15):
         "aperture_mask": aperture_mask,
         "background_mask": background_mask,
         "median_img": median_img,
-        "metadata": metadata
+        "metadata": metadata,
+        "aperture_masks": {
+            "connected_threshold": connected_threshold_mask,
+            "circular": circular_mask,
+            "threshold": threshold_mask,
+            "pipeline": pipeline_mask
+        }
     }
 
 def main():
@@ -294,7 +416,7 @@ def main():
         try:
             res = perform_aperture_photometry(raw_fits, cutout_size=int(row.get("cutout_size", 15)))
             
-            # Save compressed npz with ALL required arrays
+            # Save compressed npz with ALL required arrays and alternative masks
             np.savez_compressed(
                 npz_path,
                 time=res["time"],
@@ -307,7 +429,12 @@ def main():
                 centroid_y=res["centroid_y"],
                 quality=res["quality"],
                 aperture_mask=res["aperture_mask"],
-                background_mask=res["background_mask"]
+                background_mask=res["background_mask"],
+                median_img=res["median_img"],
+                connected_threshold_mask=res["aperture_masks"]["connected_threshold"],
+                circular_mask=res["aperture_masks"]["circular"],
+                threshold_mask=res["aperture_masks"]["threshold"],
+                pipeline_mask=res["aperture_masks"]["pipeline"]
             )
             
             # Run clean + BLS check for scientific comparison
@@ -353,6 +480,11 @@ def main():
                 "median_flux": res["metadata"]["median_raw_flux"],
                 "normalization_method": "median_division",
                 "processing_timestamp": pd.Timestamp.now().isoformat(),
+                "robust_rms": res["metadata"]["robust_rms"],
+                "cdpp_ppm": res["metadata"]["cdpp_ppm"],
+                "centroid_stability": res["metadata"]["centroid_stability"],
+                "contamination_ratio": res["metadata"]["contamination_ratio"],
+                "aperture_comparison": res["metadata"]["aperture_comparison"],
                 "scientific_check": {
                     "catalog_period": catalog_period,
                     "detected_period": detected_period,

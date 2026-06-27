@@ -127,7 +127,7 @@ def main():
     print(f"Loading label policy from {args.label_policy}")
     with open(args.label_policy, "r") as f:
         policy = yaml.safe_load(f)
-    mappings = policy.get("mappings", {})
+    mappings = policy.get("tess_toi_mapping", policy.get("mappings", {}))
     
     # 2. Audit and Load CSVs
     toi_df, tce_df = audit_archive(args.archive, args.tce)
@@ -170,26 +170,42 @@ def main():
         # Match disposition mapping
         mapping = mappings.get(disp_key)
         if not mapping:
-            exclusions.append({
-                "tic_id": tic_val,
-                "toi": row.get("toi"),
-                "reason": f"Unknown tfopwg_disp '{disp}' in policy",
-                "source_row": idx
-            })
-            continue
+            # Fallback to default
+            mapping = mappings.get("default", "stellar_variability_or_other")
             
-        action = mapping.get("action", "exclude")
+        if isinstance(mapping, str):
+            class_label = mapping
+            label_strength = "strong"
+            action = "include" if class_label != "exclude" else "exclude"
+        elif isinstance(mapping, dict):
+            if "action" in mapping:
+                action = mapping.get("action", "exclude")
+                class_label = mapping.get("label")
+                label_strength = mapping.get("strength")
+            else:
+                # Conditional like FP
+                depth_ppm = float(row.get("pl_trandep", 0.0)) if pd.notnull(row.get("pl_trandep")) else 0.0
+                if depth_ppm > 20000.0:  # > 2% depth (20000 ppm)
+                    class_label = mapping.get("high_depth", "eclipsing_binary")
+                    label_strength = "medium"
+                    action = "include"
+                else:
+                    class_label = mapping.get("default", "blend_contamination")
+                    label_strength = "medium"
+                    action = "include"
+        else:
+            action = "exclude"
+            class_label = "stellar_variability_or_other"
+            label_strength = "none"
+            
         if action == "exclude":
             exclusions.append({
                 "tic_id": tic_val,
                 "toi": row.get("toi"),
-                "reason": mapping.get("reason", "Excluded by label policy"),
+                "reason": "Excluded by label policy",
                 "source_row": idx
             })
             continue
-            
-        class_label = mapping.get("label")
-        label_strength = mapping.get("strength")
         
         # Get Candidate number
         toi_id = str(row.get("toi", ""))

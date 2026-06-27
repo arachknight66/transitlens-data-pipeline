@@ -2,43 +2,13 @@
 interface.py
 ─────────────
 Single entry-point module that `transitlens-ml-core` imports from.
-
-This is the ONLY file in `transitlens-data-pipeline` that ml-core is
-allowed to depend on. Everything else (synthetic/, real_tess/,
-datasets/) is an internal implementation detail that can change
-without breaking the contract, as long as `load_light_curve()` keeps
-returning the shape documented below.
-
-Output contract
-----------------
-{
-    "time":      List[float],        # BTJD timestamps, length N
-    "flux":      List[float],        # normalised flux, median ~1.0, length N
-    "target_id": str,
-    "source":    str,                # "synthetic" | "tess" | "csv"
-    "n_points":  int,                # len(time) == len(flux)
-    "metadata": {
-        "cadence_min":    float,
-        "time_span_days": float,
-        "sector":         int | None,
-        "label":          str | None,
-        "true_period":    float | None,
-        "true_depth":     float | None,
-        "true_duration":  float | None,
-    }
-}
-
-`time` and `flux` are always plain Python lists of floats (not numpy
-arrays) so the result is JSON-serialisable.
 """
 
 import json
 import os
-
 import numpy as np
 import pandas as pd
 import yaml
-
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -91,37 +61,6 @@ class InvalidLabelError(DataPipelineError):
 def load_light_curve(source, target_id, config=None):
     """
     Single entry point consumed by transitlens-ml-core.
-
-    Parameters
-    ----------
-    source : str
-        One of "synthetic", "tess", or "csv".
-        "synthetic" — loads from synthetic/cases/{target_id}.csv
-        "tess"      — loads from real_tess/cache/ via mast_loader
-        "csv"       — loads from an arbitrary file path passed in config["path"]
-
-    target_id : str
-        For synthetic: one of "candidate_a", "candidate_b", "candidate_c"
-        For tess: TIC ID string, e.g. "TIC-25155310"
-        For csv: descriptive name chosen by caller
-
-    config : dict, optional
-        Override any default parameters.
-        Valid keys:
-            "path"         — used when source="csv"
-            "sector"       — override sector selection for TESS
-            "cadence_min"  — override cadence assumption
-            "generate"     — if True and synthetic case CSV missing, generate it
-
-    Returns
-    -------
-    dict matching the output contract documented at the top of this file.
-
-    Raises
-    ------
-    FileNotFoundError  — source file or cache entry not found
-    ValueError         — unknown source type or malformed CSV
-    ImportError        — real_tess source requested but lightkurve not installed
     """
     config = config or {}
 
@@ -177,13 +116,6 @@ def _load_synthetic(target_id, config):
 
 
 def _generate_synthetic_case(target_id, config_path, cases_dir):
-    """
-    Self-healing fallback: if a synthetic case CSV is missing and the
-    caller passed config={'generate': True}, generate it on the fly
-    using the same generator as Phase 1.
-    """
-    # Imported lazily so importing interface.py never requires numpy's
-    # generation dependencies unless a case is actually missing.
     from synthetic.generator import generate_from_config
 
     with open(config_path, "r") as f:
@@ -202,15 +134,6 @@ def _generate_synthetic_case(target_id, config_path, cases_dir):
 
 
 def _resolve_synthetic_metadata(target_id, metadata_path, config_path):
-    """
-    Loads metadata for a synthetic target_id.
-
-    Prefers datasets/metadata.json (written by Phase 2's
-    build_from_synthetic) since it is the canonical source of truth.
-    Falls back to reading synthetic/config.yaml directly — this keeps
-    load_light_curve() working even for a freshly auto-generated case
-    that hasn't been folded into metadata.json yet.
-    """
     if os.path.exists(metadata_path):
         with open(metadata_path, "r") as f:
             all_metadata = json.load(f)
@@ -226,7 +149,6 @@ def _resolve_synthetic_metadata(target_id, metadata_path, config_path):
                 "true_duration": entry["true_duration"],
             }
 
-    # Fall back to config.yaml directly
     with open(config_path, "r") as f:
         full_config = yaml.safe_load(f)
 
@@ -255,14 +177,6 @@ def _resolve_synthetic_metadata(target_id, metadata_path, config_path):
 # ─────────────────────────────────────────────
 
 def _load_tess(target_id, config):
-    """
-    Loads a real TESS light curve via Lightkurve/MAST.
-
-    This is the Phase 5 stretch-goal path. It is wired up here so
-    ml-core can call load_light_curve("tess", ...) without caring
-    whether Phase 5 has been implemented yet, but the heavy lifting
-    lives in real_tess/mast_loader.py.
-    """
     try:
         from real_tess.mast_loader import fetch_light_curve
     except ImportError as exc:
@@ -275,9 +189,14 @@ def _load_tess(target_id, config):
         "cache_dir", os.path.join(_REPO_ROOT, "real_tess", "cache")
     )
 
-    time, flux, resolved_sector = fetch_light_curve(
+    res_tuple = fetch_light_curve(
         target_id, sector=sector, cache_dir=cache_dir
     )
+    if len(res_tuple) == 4:
+        time, flux, resolved_sector, info_dict = res_tuple
+    else:
+        time, flux, resolved_sector = res_tuple
+        info_dict = {}
 
     metadata = {
         "cadence_min": config.get("cadence_min", 2.0),
@@ -287,6 +206,8 @@ def _load_tess(target_id, config):
         "true_period": config.get("true_period"),
         "true_depth": config.get("true_depth"),
         "true_duration": config.get("true_duration"),
+        "retrieval_stages": info_dict.get("stages"),
+        "provenance": info_dict.get("provenance"),
     }
 
     return _build_result(
@@ -300,12 +221,6 @@ def _load_tess(target_id, config):
 # ─────────────────────────────────────────────
 
 def _load_csv(target_id, config):
-    """
-    Loads a light curve from an arbitrary CSV path passed via
-    config["path"]. Useful for ad-hoc files (e.g. a light curve
-    exported from another tool) without going through synthetic
-    generation or the MAST pipeline.
-    """
     path = config.get("path")
     if not path:
         raise ValueError(
@@ -321,7 +236,6 @@ def _load_csv(target_id, config):
 
     cadence_min = config.get("cadence_min")
     if cadence_min is None and len(time) > 1:
-        # Infer cadence from the median spacing between points (in minutes).
         cadence_min = float(np.median(np.diff(time)) * 1440.0)
 
     time_span_days = float(time[-1] - time[0]) if len(time) > 1 else 0.0
@@ -344,9 +258,6 @@ def _load_csv(target_id, config):
 # ─────────────────────────────────────────────
 
 def _load_fits(target_id, config):
-    """
-    Loads a light curve directly from a local FITS file.
-    """
     path = config.get("path")
     if not path:
         raise ValueError("source='fits' requires config={'path': '/path/to/file.fits'}.")
@@ -369,7 +280,6 @@ def _load_fits(target_id, config):
         "fits",
         parsed["metadata"]
     )
-
 
 
 # ─────────────────────────────────────────────

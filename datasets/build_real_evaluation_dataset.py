@@ -223,8 +223,46 @@ def main():
     processed_dir = os.path.join(datasets_dir, "processed", "lightcurves")
     splits_dir = os.path.join(processed_dir, "splits")
     os.makedirs(splits_dir, exist_ok=True)
+       # 1. Discover available light curves
+    # Load label and split lookups from manifest parquet
+    manifest_parquet_path = os.path.join(os.path.dirname(repo_root), "data", "manifests", "tess_training_targets.parquet")
+    label_lookup = {}
+    split_lookup = {}
     
-    # 1. Discover available light curves
+    # Historic synthetic splits
+    label_lookup["candidate_a"] = "exoplanet_transit"
+    split_lookup["candidate_a"] = "test"
+    label_lookup["candidate_b"] = "eclipsing_binary"
+    split_lookup["candidate_b"] = "val"
+    label_lookup["candidate_c"] = "stellar_variability_or_other"
+    split_lookup["candidate_c"] = "train"
+    
+    if os.path.exists(manifest_parquet_path):
+        mdf = pd.read_parquet(manifest_parquet_path)
+        for _, row in mdf.iterrows():
+            tid = str(row["target_id"])
+            label_lookup[tid] = row["class_label"]
+            split_lookup[tid] = row["split"]
+            
+            # also index by normalized id format (e.g. TIC-1234)
+            tic_val = row["tic_id"]
+            if pd.notnull(tic_val):
+                label_lookup[f"TIC-{int(tic_val)}"] = row["class_label"]
+                split_lookup[f"TIC-{int(tic_val)}"] = row["split"]
+                label_lookup[str(int(tic_val))] = row["class_label"]
+                split_lookup[str(int(tic_val))] = row["split"]
+
+    import hashlib
+    def get_deterministic_split(tid):
+        h = int(hashlib.md5(str(tid).encode()).hexdigest(), 16)
+        r = h % 100
+        if r < 70:
+            return "train"
+        elif r < 85:
+            return "val"
+        else:
+            return "test"
+
     synthetic_cases_dir = os.path.join(repo_root, "synthetic", "cases")
     config_yaml_path = os.path.join(repo_root, "synthetic", "config.yaml")
     
@@ -276,6 +314,7 @@ def main():
             "source": "synthetic",
             "evidence_level": "synthetic",
             "class_label": class_label,
+            "split": split_lookup.get(case_name, "train"),
             "lightcurve_path": npz_filename,
             "n_points": n_points,
             "time_span_days": time_span,
@@ -304,69 +343,82 @@ def main():
                 fits_path = os.path.join(tess_cache_dir, filename)
                 print(f"  [OK] Processing TESS FITS: {filename}")
                 try:
-                    data = extract_tess_fits(fits_path)
-                    meta = data["metadata"]
-                    raw_id = meta["target_id"]
-                    normalized_id = normalize_tic_id(raw_id)
-                    
-                    npz_filename = f"{normalized_id}.npz"
-                    npz_path = os.path.join(processed_dir, npz_filename)
-                    
-                    # Save arrays to NPZ
-                    save_args = {"time": data["time"], "flux": data["flux"]}
-                    if "flux_err" in data:
-                        save_args["flux_err"] = data["flux_err"]
-                    if "centroid_x" in data:
-                        save_args["centroid_x"] = data["centroid_x"]
-                    if "centroid_y" in data:
-                        save_args["centroid_y"] = data["centroid_y"]
-                    if "quality" in data:
-                        save_args["quality"] = data["quality"]
-                        
-                    np.savez_compressed(npz_path, **save_args)
-                    
-                    # Query TOI Ground Truth
-                    toi_info = get_toi_metadata(normalized_id)
-                    if toi_info is None:
-                        # Fallback default values
-                        toi_info = {
-                            "true_period_days": None,
-                            "true_depth": None,
-                            "true_duration_days": None,
-                            "true_epoch_btjd": None,
-                            "ground_truth_source": "unknown"
-                        }
-                        
-                    n_points = len(data["time"])
-                    time_span = float(data["time"][-1] - data["time"][0]) if n_points > 1 else 0.0
-                    cadence = float(np.median(np.diff(data["time"])) * 1440.0) if n_points > 1 else 0.0
-                    
-                    targets.append({
-                        "target_id": normalized_id,
-                        "source": "real_tess",
-                        "evidence_level": "real_tess",
-                        "class_label": "exoplanet_transit", # Verified from historical splits/labels
-                        "lightcurve_path": npz_filename,
-                        "n_points": n_points,
-                        "time_span_days": time_span,
-                        "cadence_min_median": cadence,
-                        "true_period_days": toi_info["true_period_days"],
-                        "true_depth": toi_info["true_depth"],
-                        "true_duration_days": toi_info["true_duration_days"],
-                        "true_epoch_btjd": toi_info["true_epoch_btjd"],
-                        "ground_truth_source": toi_info["ground_truth_source"],
-                        "sector": meta["sector"],
-                        "mission": "TESS",
-                        "has_flux_err": "flux_err" in save_args,
-                        "has_centroid": "centroid_x" in save_args and "centroid_y" in save_args,
-                        "has_quality_flags": "quality" in save_args,
-                        "contamination_available": False,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "notes": f"Extracted from {filename}. Camera {meta.get('camera')}, CCD {meta.get('ccd')}"
-                    })
+                     data = extract_tess_fits(fits_path)
+                     meta = data["metadata"]
+                     raw_id = meta["target_id"]
+                     normalized_id = normalize_tic_id(raw_id)
+                     
+                     npz_filename = f"{normalized_id}.npz"
+                     npz_path = os.path.join(processed_dir, npz_filename)
+                     
+                     # Save arrays to NPZ
+                     save_args = {"time": data["time"], "flux": data["flux"]}
+                     if "flux_err" in data:
+                         save_args["flux_err"] = data["flux_err"]
+                     if "centroid_x" in data:
+                         save_args["centroid_x"] = data["centroid_x"]
+                     if "centroid_y" in data:
+                         save_args["centroid_y"] = data["centroid_y"]
+                     if "quality" in data:
+                         save_args["quality"] = data["quality"]
+                         
+                     np.savez_compressed(npz_path, **save_args)
+                     
+                     # Query TOI Ground Truth
+                     toi_info = get_toi_metadata(normalized_id)
+                     if toi_info is None:
+                         # Fallback default values
+                         toi_info = {
+                             "true_period_days": None,
+                             "true_depth": None,
+                             "true_duration_days": None,
+                             "true_epoch_btjd": None,
+                             "ground_truth_source": "unknown"
+                         }
+                         
+                     n_points = len(data["time"])
+                     time_span = float(data["time"][-1] - data["time"][0]) if n_points > 1 else 0.0
+                     cadence = float(np.median(np.diff(data["time"])) * 1440.0) if n_points > 1 else 0.0
+                     
+                     # Resolve split and class label
+                     class_label = label_lookup.get(normalized_id)
+                     if not class_label:
+                         # try raw ticid without TIC prefix
+                         raw_num = "".join(c for c in normalized_id if c.isdigit())
+                         class_label = label_lookup.get(raw_num, "stellar_variability_or_other")
+                         
+                     split = split_lookup.get(normalized_id)
+                     if not split:
+                         raw_num = "".join(c for c in normalized_id if c.isdigit())
+                         split = split_lookup.get(raw_num, get_deterministic_split(normalized_id))
+                     
+                     targets.append({
+                         "target_id": normalized_id,
+                         "source": "real_tess",
+                         "evidence_level": "real_tess",
+                         "class_label": class_label,
+                         "split": split,
+                         "lightcurve_path": npz_filename,
+                         "n_points": n_points,
+                         "time_span_days": time_span,
+                         "cadence_min_median": cadence,
+                         "true_period_days": toi_info["true_period_days"],
+                         "true_depth": toi_info["true_depth"],
+                         "true_duration_days": toi_info["true_duration_days"],
+                         "true_epoch_btjd": toi_info["true_epoch_btjd"],
+                         "ground_truth_source": toi_info["ground_truth_source"],
+                         "sector": meta["sector"],
+                         "mission": "TESS",
+                         "has_flux_err": "flux_err" in save_args,
+                         "has_centroid": "centroid_x" in save_args and "centroid_y" in save_args,
+                         "has_quality_flags": "quality" in save_args,
+                         "contamination_available": False,
+                         "created_at": datetime.now(timezone.utc).isoformat(),
+                         "notes": f"Extracted from {filename}. Camera {meta.get('camera')}, CCD {meta.get('ccd')}"
+                     })
                 except Exception as e:
-                    print(f"  [ERROR] Failed to process {filename}: {e}")
-                    
+                     print(f"  [ERROR] Failed to process {filename}: {e}")
+                     
     if not targets:
         print("\n[FAIL] No evaluable targets found!")
         sys.exit(1)
@@ -378,17 +430,9 @@ def main():
     print(f"\nWrote central manifest to {manifest_path}")
     
     # 3. Create splits
-    # Respect historic target-split assignments to guarantee target disjointness:
-    # - Train: candidate_c, TIC-237913194, TIC-25155310, TIC-307210830
-    # - Val: candidate_b, TIC-261136679
-    # - Test: candidate_a
-    train_ids = {"candidate_c", "TIC-237913194", "TIC-25155310", "TIC-307210830"}
-    val_ids = {"candidate_b", "TIC-261136679"}
-    test_ids = {"candidate_a"}
-    
-    train_df = manifest_df[manifest_df["target_id"].isin(train_ids)]
-    val_df = manifest_df[manifest_df["target_id"].isin(val_ids)]
-    test_df = manifest_df[manifest_df["target_id"].isin(test_ids)]
+    train_df = manifest_df[manifest_df["split"] == "train"]
+    val_df = manifest_df[manifest_df["split"] == "val"]
+    test_df = manifest_df[manifest_df["split"] == "test"]
     
     split_manifest_cols = [
         "target_id", "class_label", "source", "evidence_level", "lightcurve_path",
