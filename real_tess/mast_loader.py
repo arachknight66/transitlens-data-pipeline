@@ -141,7 +141,13 @@ def _download_with_retry(search_result, index, retries=1):
 def _normalise_tic_id(tic_id):
     """Strips 'TIC'/'TIC-' prefixes and whitespace so cache filenames
     and lookups are consistent regardless of how the caller wrote it."""
-    return str(tic_id).upper().replace("TIC", "").replace("-", "").strip()
+    clean_id = str(tic_id).upper().replace("TIC", "").replace("-", "").strip()
+    clean_id = "".join(clean_id.split())
+    if not clean_id.isdigit():
+        raise ValueError(
+            f"Invalid TIC ID '{tic_id}'. Enter the numeric TESS Input Catalog identifier."
+        )
+    return clean_id
 
 
 def _cache_filename(clean_id, sector):
@@ -169,19 +175,14 @@ def _find_cached_file(clean_id, sector, cache_dir):
 
 
 def _read_fits_cache(cache_path):
-    """Reads a cached .fits light curve back into raw (time, flux,
-    quality) arrays. Imports lightkurve lazily since this is only
-    reached when a cache hit means we never needed to search MAST."""
-    try:
-        import lightkurve as lk
-    except ImportError as exc:
-        raise ImportError(
-            "Reading a cached .fits light curve still requires the "
-            "'lightkurve' package to parse the file format."
-        ) from exc
+    """Read cached SPOC/QLP FITS without requiring Lightkurve.
 
-    lc = lk.read(cache_path)
-    time = np.asarray(lc.time.value, dtype=np.float64)
-    flux = np.asarray(lc.flux.value, dtype=np.float64)
-    quality = np.asarray(lc.quality, dtype=np.int64) if hasattr(lc, "quality") else None
-    return time, flux, quality
+    The shared Astropy parser supports standard TESS light-curve files and
+    Lightkurve exports. This keeps cached TIC retrieval functional in the
+    normal ml-core environment, where Astropy is installed but Lightkurve may
+    intentionally be absent.
+    """
+    from real_tess.fits_parser import read_fits_lightcurve
+
+    parsed = read_fits_lightcurve(cache_path)
+    return parsed["time"], parsed["flux_raw"], parsed["quality"]

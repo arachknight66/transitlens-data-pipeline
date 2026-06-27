@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import pytest
 import numpy as np
 from astropy.io import fits
@@ -6,12 +7,17 @@ from real_tess.fits_parser import read_fits_lightcurve, load_fits_and_normalize,
 from interface import load_light_curve
 
 # Paths for testing
-CACHE_DIR = r"C:\Users\arach\Documents\Projects\Transitlens\transitlens-data-pipeline\real_tess\cache"
-VALID_FITS = os.path.join(CACHE_DIR, "TIC261136679_sector095.fits")
+CACHE_DIR = Path(__file__).resolve().parents[1] / "real_tess" / "cache"
+VALID_FITS = CACHE_DIR / "TIC261136679_sector095.fits"
+
+
+def _require_cached_tess_fixture():
+    if not VALID_FITS.exists():
+        pytest.skip("cached TESS integration fixture is not available")
 
 def test_read_valid_fits():
     """Verify that read_fits_lightcurve correctly reads a valid FITS file."""
-    assert os.path.exists(VALID_FITS), f"Test requires cached TESS FITS: {VALID_FITS}"
+    _require_cached_tess_fixture()
     
     parsed = read_fits_lightcurve(VALID_FITS)
     assert "time" in parsed
@@ -26,6 +32,7 @@ def test_read_valid_fits():
 
 def test_load_fits_and_normalize_valid():
     """Verify that load_fits_and_normalize correctly normalizes and cleans the data."""
+    _require_cached_tess_fixture()
     parsed = load_fits_and_normalize(VALID_FITS)
     
     time = parsed["time"]
@@ -51,6 +58,7 @@ def test_load_fits_and_normalize_valid():
 
 def test_load_light_curve_fits():
     """Verify interface entry point with source='fits'."""
+    _require_cached_tess_fixture()
     result = load_light_curve(
         source="fits",
         target_id="TIC 261136679",

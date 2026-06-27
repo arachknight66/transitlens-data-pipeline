@@ -264,15 +264,6 @@ def _load_tess(target_id, config):
     lives in real_tess/mast_loader.py.
     """
     try:
-        import lightkurve  # noqa: F401
-    except ImportError as exc:
-        raise ImportError(
-            "source='tess' requires the 'lightkurve' package, which is not "
-            "installed. Uncomment lightkurve/astroquery in requirements.txt "
-            "and `pip install -r requirements.txt` to enable real TESS data."
-        ) from exc
-
-    try:
         from real_tess.mast_loader import fetch_light_curve
     except ImportError as exc:
         raise ImportError(

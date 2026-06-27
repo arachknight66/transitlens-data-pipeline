@@ -1,4 +1,6 @@
 import os
+import os
+
 import numpy as np
 from astropy.io import fits
 from real_tess.flux_normaliser import normalise_pdcsap

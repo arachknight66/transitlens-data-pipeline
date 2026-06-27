@@ -142,6 +142,12 @@ def test_normalise_tic_id(raw_id):
     assert _normalise_tic_id(raw_id) == "25155310"
 
 
+@pytest.mark.parametrize("raw_id", ["", "TIC", "not-a-tic", "123ABC"])
+def test_normalise_tic_id_rejects_invalid_values(raw_id):
+    with pytest.raises(ValueError, match="Invalid TIC ID"):
+        _normalise_tic_id(raw_id)
+
+
 def test_cache_filename_convention():
     assert _cache_filename("25155310", 15) == "TIC25155310_sector015.fits"
 
