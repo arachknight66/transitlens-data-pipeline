@@ -71,6 +71,18 @@ def read_fits_lightcurve(path):
             "ccd": getattr(lc, "ccd", None) or getattr(obj, "ccd", None),
         }
         
+        # Extract contamination/crowding headers if available (SPOC products)
+        try:
+            hdul_hdr = fits.open(path, memmap=False)
+            for hdu in hdul_hdr:
+                if hasattr(hdu, 'header'):
+                    for key in ['CROWDSAP', 'FLFRCSAP', 'TESSMAG', 'RA_OBJ', 'DEC_OBJ']:
+                        if key in hdu.header and metadata.get(key) is None:
+                            metadata[key] = hdu.header[key]
+            hdul_hdr.close()
+        except Exception:
+            pass
+        
         if time.ndim == 1 and flux_raw.ndim == 1:
             return {
                 "time": time,
@@ -164,6 +176,13 @@ def read_fits_lightcurve(path):
             "camera": primary_header.get("CAMERA") or header.get("CAMERA"),
             "ccd": primary_header.get("CCD") or header.get("CCD"),
         }
+        
+        # Extract contamination/crowding headers if available (SPOC products)
+        for hdu in hdul:
+            if hasattr(hdu, 'header'):
+                for key in ['CROWDSAP', 'FLFRCSAP', 'TESSMAG', 'RA_OBJ', 'DEC_OBJ']:
+                    if key in hdu.header and metadata.get(key) is None:
+                        metadata[key] = hdu.header[key]
         
         return {
             "time": time,

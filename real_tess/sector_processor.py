@@ -106,6 +106,18 @@ def process_fits_file(fits_path):
             }
         }
         
+        # Extract contamination/crowding headers if available (SPOC products)
+        crowdsap = None
+        flfrcsap = None
+        for h in hdul:
+            if hasattr(h, 'header'):
+                if crowdsap is None and 'CROWDSAP' in h.header:
+                    crowdsap = float(h.header['CROWDSAP'])
+                if flfrcsap is None and 'FLFRCSAP' in h.header:
+                    flfrcsap = float(h.header['FLFRCSAP'])
+        result["metadata"]["crowding_metric"] = crowdsap
+        result["metadata"]["flux_fraction"] = flfrcsap
+        
         # Optional fields
         flux_err_col = flux_col + "_ERR" if (flux_col + "_ERR") in colnames else None
         if flux_err_col:
