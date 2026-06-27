@@ -1,6 +1,6 @@
 # Dataset Validation Report
 
-Generated on: 2026-06-26T13:38:07.875302+00:00
+Generated on: 2026-06-27T05:11:40.326566+00:00
 Overall Status: 🟢 PASS
 
 ## 1. Summary of Evaluated Targets
@@ -13,9 +13,9 @@ Overall Status: 🟢 PASS
 | Class Label | Target Count |
 | :--- | :--- |
 | `eclipsing_binary` | 1 |
+| `exoplanet_transit` | 5 |
 | `stellar_variability_or_other` | 1 |
 | `blend_contamination` | 0 |
-| `exoplanet_transit` | 5 |
 
 ### Target Distributions by Source
 | Source | Target Count |
