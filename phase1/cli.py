@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import pandas as pd
+from phase1.atomic_io import atomic_write_parquet
 
 # Add repo root to sys.path to resolve imports properly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -142,9 +143,9 @@ def run_process_stage(config, limit=None, run_id=None):
             if total % 1000 == 0 or total == len(targets):
                 logger.info(f"Processed: {processed_count}, Quarantined: {quarantine_count} of {len(targets)} files. Elapsed: {time.time() - t_start:.1f}s")
                 # Update download manifest parquet incrementally
-                df_dl.to_parquet(download_manifest_path, index=False)
+                atomic_write_parquet(df_dl, download_manifest_path, index=False)
                 
-    df_dl.to_parquet(download_manifest_path, index=False)
+    atomic_write_parquet(df_dl, download_manifest_path, index=False)
     logger.info(f"FITS parsing stage completed: {processed_count} successfully parsed, {quarantine_count} quarantined.")
 
 def main():
@@ -152,7 +153,8 @@ def main():
     parser_arg.add_argument("command", choices=[
         "discover", "select-sectors", "ingest-catalogs", "resolve-labels", "download", 
         "verify-downloads", "process", "build-splits", "build-manifest", 
-        "validate", "report", "final-verify", "status", "run-all"
+        "validate", "report", "final-verify", "status", "run-all",
+        "discover-dvr-xml", "download-dvr-xml"
     ], help="Stage command to execute")
     parser_arg.add_argument("--config", default=None, help="Path to config YAML")
     parser_arg.add_argument("--run-id", default=None, help="Run ID for tracking execution")
@@ -261,6 +263,16 @@ def main():
                 sys.exit(1)
             if result["status"] == "PARTIAL":
                 sys.exit(2)
+
+        elif args.command == "discover-dvr-xml":
+            from phase1.dv_xml import discover_targeted_dvr_xml
+            manifest, missing = discover_targeted_dvr_xml(config)
+            logger.info(f"Discovered {len(manifest)} targeted DVR XML products; missing pairs: {missing}")
+
+        elif args.command == "download-dvr-xml":
+            from phase1.dv_xml import download_targeted_dvr_xml
+            manifest = download_targeted_dvr_xml(config, concurrency=args.concurrency or 4)
+            logger.info(f"DVR XML statuses: {manifest['status'].value_counts().to_dict()}")
             
         elif args.command == "status":
             logger.info(f"Run ID: {run_id}")

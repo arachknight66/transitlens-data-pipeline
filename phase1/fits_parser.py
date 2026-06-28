@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import hashlib
+import os
 from pathlib import Path
 import numpy as np
 from astropy.io import fits
@@ -304,8 +305,9 @@ def process_and_save(row_idx, row, config, manifests_dir, download_manifest_path
         arrays, metadata = parse_single_fits(fits_path, checksum, config)
         
         # Save preprocessed NPZ
+        temporary_lc_path = processed_lc_path.with_name(processed_lc_path.stem + ".tmp.npz")
         np.savez_compressed(
-            processed_lc_path,
+            temporary_lc_path,
             time=arrays["time"],
             flux=arrays["flux"],
             flux_err=arrays["flux_err"],
@@ -332,13 +334,16 @@ def process_and_save(row_idx, row, config, manifests_dir, download_manifest_path
             usable_mask=arrays["usable_mask"],
             normalization_mask=arrays["normalization_mask"],
         )
+        os.replace(temporary_lc_path, processed_lc_path)
         
         # Save metadata sidecar
         metadata["processed_path"] = str(processed_lc_path)
         metadata["processed_sha256"] = compute_sha256(processed_lc_path)
         
-        with open(processed_meta_path, "w", encoding="utf-8") as f:
+        temporary_meta_path = processed_meta_path.with_suffix(".json.tmp")
+        with open(temporary_meta_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
+        os.replace(temporary_meta_path, processed_meta_path)
             
         return {
             "status": "processed",

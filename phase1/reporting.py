@@ -67,6 +67,24 @@ def generate_release_documentation(config, run_id):
 
     timestamp_str = datetime.now(timezone.utc).isoformat()
 
+    science_limitations = []
+    missing_authoritative_classes = [
+        label for label in ("eclipsing_binary", "blend_contamination")
+        if class_counts.get(label, 0) == 0
+    ]
+    if missing_authoritative_classes:
+        science_limitations.append(
+            "No authoritative observations were resolved for: "
+            + ", ".join(missing_authoritative_classes)
+            + "."
+        )
+    science_limitations.extend([
+        f"{centroid_missing} parsed observations lack finite centroid arrays.",
+        f"Target-pixel-file companions available: {tpf_available} of {n_parsed} parsed observations.",
+        f"Download or parsing failures: {n_failed}; remaining pending discoveries are not counted as observations.",
+    ])
+    science_limitations_md = "\n".join(f"* {item}" for item in science_limitations)
+
     dataset_summary = {
         "dataset_name": config.dataset_name,
         "dataset_version": config.dataset_version,
@@ -344,10 +362,7 @@ Pipeline Release Gate Status: **{validation_status}**
 
 ## 6. Remaining Scientific Limitations
 
-* No authoritative eclipsing-binary or blend-contamination labels intersected the downloaded sector cohort.
-* {centroid_missing} parsed observations lack finite centroid arrays.
-* Target-pixel-file companions available: {tpf_available} of {n_parsed} parsed observations.
-* Archive download failures: 0; the remaining discovered products were not acquired because the existing cohort already exceeded the observation gate.
+{science_limitations_md}
 
 This completion report is compiled directly from the canonical manifests.
 """

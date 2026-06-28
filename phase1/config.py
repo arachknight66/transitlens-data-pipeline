@@ -82,7 +82,16 @@ class Config:
         # Catalog locations: resolve relative to REPO_ROOT
         cat_locs = self._cfg.get("catalogue_locations", {})
         self.toi_catalog = REPO_ROOT / cat_locs.get("toi_catalog", "archive/TOI_2026.06.25_21.21.19.csv")
+        self.mast_toi_catalog = REPO_ROOT / cat_locs.get(
+            "mast_toi_catalog", "archive/phase1_catalogs/2026-06-28/mast_toi_current.csv"
+        )
         self.tce_catalog = REPO_ROOT / cat_locs.get("tce_catalog", "archive/tess s0078-s0078_tcestats.csv")
+        self.additional_tce_catalogs = [
+            REPO_ROOT / value for value in cat_locs.get("additional_tce_catalogs", [])
+        ]
+        self.eb_catalog = REPO_ROOT / cat_locs.get(
+            "eb_catalog", "archive/hlsp_tess-ebs_tess_lcf-ffi_s0001-s0026_tess_v1.0_cat.csv"
+        )
         self.cumulative_catalog = REPO_ROOT / cat_locs.get("cumulative_catalog", "archive/cumulative.csv")
         self.planets_catalog = REPO_ROOT / cat_locs.get("planets_catalog", "archive/planets.csv")
 

@@ -13,6 +13,8 @@ import phase1.deduplication as dedup
 import phase1.split_builder as splits
 import phase1.validation as validator
 import phase1.checksums as csums
+import phase1.downloader as downloader
+from phase1.atomic_io import atomic_write_parquet
 
 def make_dummy_fits(path, tic_id, sector, exptime=120.0, cadence_diff_sec=120.0, n_points=200, corrupt=False):
     """Helper to write a valid or corrupt TESS-like dummy FITS file."""
@@ -67,7 +69,7 @@ def mock_config(tmp_path):
 dataset_name: "test-dataset"
 dataset_version: "1.0.0"
 random_seed: 42
-label_policy_version: "1.0.0"
+label_policy_version: "1.1.0"
 cadence_limits:
   min_cadence_seconds: 110.0
   max_cadence_seconds: 130.0
@@ -110,7 +112,10 @@ minimum_desired_class_counts:
   test: {{planets: 1, ebs: 1, blends: 1}}
 catalogue_locations:
   toi_catalog: "{tmp_path.as_posix()}/archive/toi.csv"
+  mast_toi_catalog: "{tmp_path.as_posix()}/archive/mast_toi.csv"
   tce_catalog: "{tmp_path.as_posix()}/archive/tce.csv"
+  additional_tce_catalogs: []
+  eb_catalog: "{tmp_path.as_posix()}/archive/tess_eb.csv"
   cumulative_catalog: "{tmp_path.as_posix()}/archive/cumulative.csv"
   planets_catalog: "{tmp_path.as_posix()}/archive/planets.csv"
 quarantine_rules:
@@ -365,3 +370,163 @@ def test_generic_toi_false_positive_requires_review(mock_config, tmp_path):
     row = evidence[evidence["tic_id"] == 12345].iloc[0]
     assert row["canonical_label_candidate"] == "review_required"
     assert "depth" not in row["notes"].lower()
+
+
+def test_downloader_resume_preserves_successful_parse_state(mock_config):
+    """Re-entering download must not erase work completed by parsing."""
+    mock_config.ensure_dirs()
+    discovery = pd.DataFrame([{
+        "obs_id": "obs_1", "tic_id": 123, "sector": 78,
+        "product_filename": "tess-test-lc.fits",
+        "download_url": "https://example.invalid/tess-test-lc.fits",
+        "product_uri": "mast:TESS/product/tess-test-lc.fits",
+        "status": "discovered",
+    }])
+    discovery.to_parquet(mock_config.manifests_dir / "discovery_manifest.parquet", index=False)
+    prior = discovery.copy()
+    prior["local_path"] = str(tmp_path := mock_config.raw_dir / "already.fits")
+    prior["actual_size"] = 10
+    prior["sha256"] = "abc"
+    prior["attempt_count"] = 1
+    prior["final_status"] = "verified"
+    prior["download_status"] = "verified"
+    prior["parse_status"] = "success"
+    prior["failure_message"] = ""
+    prior["failure_type"] = ""
+    prior["first_attempt"] = "2026-01-01T00:00:00+00:00"
+    prior["last_attempt"] = "2026-01-01T00:01:00+00:00"
+    prior.to_parquet(mock_config.manifests_dir / "download_manifest.parquet", index=False)
+
+    downloader.run_download(mock_config, resume=True)
+
+    resumed = pd.read_parquet(mock_config.manifests_dir / "download_manifest.parquet")
+    assert resumed.loc[0, "download_status"] == "verified"
+    assert resumed.loc[0, "parse_status"] == "success"
+    assert resumed.loc[0, "first_attempt"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_interrupted_download_resumes_with_http_range(tmp_path):
+    """A valid Range response completes an existing partial FITS atomically."""
+    source = tmp_path / "source.fits"
+    make_dummy_fits(source, tic_id=123, sector=78, n_points=20)
+    payload = source.read_bytes()
+    destination = tmp_path / "download.fits"
+    part = destination.with_suffix(".part")
+    split_at = len(payload) // 2
+    part.write_bytes(payload[:split_at])
+
+    class Response:
+        status_code = 206
+        headers = {
+            "content-length": str(len(payload) - split_at),
+            "content-range": f"bytes {split_at}-{len(payload) - 1}/{len(payload)}",
+        }
+
+        @staticmethod
+        def iter_content(chunk_size):
+            yield payload[split_at:]
+
+    class Session:
+        @staticmethod
+        def get(url, **kwargs):
+            assert kwargs["headers"] == {"Range": f"bytes={split_at}-"}
+            return Response()
+
+    success, status, error, digest = downloader.download_file_with_retry(
+        "https://example.invalid/download.fits", destination, retries=0,
+        session=Session(),
+    )
+
+    assert success and status == "verified" and not error
+    assert destination.read_bytes() == payload
+    assert not part.exists()
+    assert digest == csums.file_sha256(destination)
+
+
+@pytest.mark.parametrize("name", ["../escape.fits", "subdir/file.fits", "", "not-fits.txt"])
+def test_archive_filename_path_traversal_is_rejected(name):
+    with pytest.raises(ValueError):
+        downloader.safe_product_filename(name)
+
+
+def test_atomic_parquet_write_leaves_no_temporary_file(tmp_path):
+    destination = tmp_path / "manifest.parquet"
+    atomic_write_parquet(pd.DataFrame({"value": [1, 2]}), destination)
+    assert pd.read_parquet(destination)["value"].tolist() == [1, 2]
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_tess_eb_catalogue_maps_to_authoritative_eb(mock_config):
+    archive_dir = mock_config.eb_catalog.parent
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "tess_id": 987654321,
+        "signal_id": 2,
+        "date_modified": "2021-09-16 00:00:00",
+        "period": 1.25,
+        "sectors": "9,10",
+        "bjd0": 1544.1,
+        "prim_depth_pf": 0.12,
+        "prim_width_pf": 0.08,
+    }]).to_csv(mock_config.eb_catalog, index=False)
+
+    import phase1.catalog_ingestion as ingestion
+    evidence = ingestion.ingest_all_catalogs(mock_config)
+    row = evidence[evidence["tic_id"] == 987654321].iloc[0]
+    assert row["canonical_label_candidate"] == "eclipsing_binary"
+    assert row["source_catalog"] == "TESS_EB_HLSP"
+    assert row["evidence_level"] == "catalog_authoritative"
+    assert row["evidence_strength"] == "strong"
+    assert row["source_row_identifier"] == "987654321:2"
+
+
+def test_completion_report_does_not_hardcode_missing_eb_claim():
+    source = Path(__import__("phase1.reporting", fromlist=["x"]).__file__).read_text(encoding="utf-8")
+    assert "No authoritative eclipsing-binary or blend-contamination labels" not in source
+
+
+def test_concordant_spoc_centroid_offsets_map_to_blend(mock_config):
+    mock_config.tce_catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "ticid": 24680, "tceid": "00000024680-01", "sectors": "s0078",
+        "lastUpdate": "2026-01-01", "tce_period": 2.0,
+        "tce_time0bt": 1500.0, "tce_depth": 1000.0, "tce_duration": 2.0,
+        "tce_dicco_msky": 3.0, "tce_dicco_msky_err": 0.2,
+        "tce_ditco_msky": 2.5, "tce_ditco_msky_err": 0.2,
+    }]).to_csv(mock_config.tce_catalog, index=False)
+
+    import phase1.catalog_ingestion as ingestion
+    evidence = ingestion.ingest_all_catalogs(mock_config)
+    row = evidence[(evidence["tic_id"] == 24680) & evidence["source_catalog"].str.startswith("TESS_TCE_")].iloc[0]
+    assert row["canonical_label_candidate"] == "blend_contamination"
+    assert row["evidence_level"] == "catalog_authoritative"
+    assert row["original_disposition"] == "SPOC_DV_CONCORDANT_CENTROID_OFFSET"
+
+
+def test_single_centroid_diagnostic_remains_weak_tce(mock_config):
+    mock_config.tce_catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "ticid": 13579, "tceid": "00000013579-01", "sectors": "s0078",
+        "tce_dicco_msky": 3.0, "tce_dicco_msky_err": 0.2,
+        "tce_ditco_msky": 0.5, "tce_ditco_msky_err": 0.2,
+    }]).to_csv(mock_config.tce_catalog, index=False)
+
+    import phase1.catalog_ingestion as ingestion
+    evidence = ingestion.ingest_all_catalogs(mock_config)
+    row = evidence[(evidence["tic_id"] == 13579) & evidence["source_catalog"].str.startswith("TESS_TCE_")].iloc[0]
+    assert row["canonical_label_candidate"] == "exoplanet_transit"
+    assert row["evidence_level"] == "catalog_weak"
+
+
+def test_mast_toi_centroid_flag_maps_to_blend(mock_config):
+    mock_config.mast_toi_catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "TIC": 112233, "Full TOI ID": "TOI 1.01", "TOI Disposition": "PC",
+        "Centroid Offset": True, "Updated": "2026-01-01",
+    }]).to_csv(mock_config.mast_toi_catalog, index=False)
+
+    import phase1.catalog_ingestion as ingestion
+    evidence = ingestion.ingest_all_catalogs(mock_config)
+    row = evidence[(evidence["tic_id"] == 112233) & (evidence["source_catalog"] == "MAST_TOI_EXOFOP")].iloc[0]
+    assert row["canonical_label_candidate"] == "blend_contamination"
+    assert row["evidence_strength"] == "strong"

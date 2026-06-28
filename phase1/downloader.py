@@ -11,7 +11,19 @@ import requests
 from datetime import datetime, timezone
 import shutil
 
+from phase1.atomic_io import atomic_write_parquet
+
 logger = logging.getLogger(__name__)
+
+
+def safe_product_filename(value):
+    """Return a safe archive basename or reject untrusted path components."""
+    name = str(value or "").strip()
+    if not name or name in {".", ".."} or Path(name).name != name:
+        raise ValueError(f"Unsafe archive product filename: {value!r}")
+    if not name.lower().endswith((".fits", ".fits.gz")):
+        raise ValueError(f"Unsupported archive product filename: {value!r}")
+    return name
 
 
 def ensure_download_manifest_contract(frame, run_id=""):
@@ -75,11 +87,26 @@ def download_file_with_retry(download_url, dest_path, retries=3, backoff=1.5, ti
             r = getter(download_url, stream=True, timeout=timeout, headers=headers)
             if r.status_code == 404:
                 return False, "archive_missing", "MAST returned HTTP 404", ""
+            elif r.status_code == 416 and resume_from:
+                # A complete response may have reached disk before interruption.
+                is_valid, fits_err = verify_fits_readable(part_path)
+                if is_valid:
+                    sha256 = compute_sha256(part_path)
+                    os.replace(part_path, dest_path)
+                    return True, "verified", "", sha256
+                last_err = f"Range not satisfiable and partial FITS is invalid: {fits_err}"
+                part_path.unlink(missing_ok=True)
+                continue
             elif r.status_code not in (200, 206):
                 last_err = f"HTTP {r.status_code}"
                 continue
 
             append = resume_from > 0 and r.status_code == 206
+            if append:
+                content_range = r.headers.get("content-range", "")
+                if not content_range.startswith(f"bytes {resume_from}-"):
+                    last_err = f"Invalid Content-Range for resume: {content_range!r}"
+                    continue
             response_size = int(r.headers.get("content-length", 0))
             expected_size = resume_from + response_size if append else response_size
             
@@ -145,8 +172,20 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
     if resume and download_manifest_path.exists():
         logger.info("Resuming from existing download manifest...")
         df_dl = pd.read_parquet(download_manifest_path)
-        # Outer join to include new discovered items if any
-        merged = pd.merge(df_disc, df_dl[["obs_id", "local_path", "actual_size", "sha256", "attempt_count", "final_status", "failure_message"]], on="obs_id", how="left")
+        # Preserve every mutable stage field. In particular, a downloader resume
+        # must not turn a successfully parsed observation back into ``pending``.
+        state_columns = [
+            "local_path", "actual_size", "sha256", "attempt_count",
+            "final_status", "download_status", "parse_status",
+            "failure_message", "failure_type", "first_attempt", "last_attempt",
+            "download_run_id", "code_version", "processed_path",
+            "processed_sha256",
+        ]
+        available_state = [c for c in state_columns if c in df_dl.columns]
+        df_disc = df_disc.drop(columns=[c for c in available_state if c in df_disc.columns])
+        merged = pd.merge(
+            df_disc, df_dl[["obs_id", *available_state]], on="obs_id", how="left"
+        )
         # Fill NaNs
         merged["final_status"] = merged["final_status"].fillna("pending")
         merged["attempt_count"] = merged["attempt_count"].fillna(0).astype(int)
@@ -184,9 +223,9 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
     df_manifest = ensure_download_manifest_contract(df_manifest)
 
     # Filter out failures if we are NOT retrying failures
-    mask_to_download = df_manifest["final_status"] == "pending"
+    mask_to_download = df_manifest["download_status"] == "pending"
     if retry_failures:
-        mask_to_download = mask_to_download | df_manifest["final_status"].isin(["network_failed", "checksum_failed"])
+        mask_to_download = mask_to_download | df_manifest["download_status"].isin(["network_failed", "checksum_failed"])
         
     # If verify_only, we don't download, we just check already downloaded files
     if verify_only:
@@ -210,7 +249,7 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
                     df_manifest.at[idx, "failure_message"] = f"Corrupted file: {err}"
                     corrupt_count += 1
                     
-        df_manifest.to_parquet(download_manifest_path, index=False)
+        atomic_write_parquet(df_manifest, download_manifest_path, index=False)
         logger.info(f"Verify-only check complete: {verified_count} verified, {corrupt_count} corrupt.")
         return
         
@@ -220,7 +259,7 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
         
     if len(targets) == 0:
         logger.info("No targets require downloading.")
-        df_manifest.to_parquet(download_manifest_path, index=False)
+        atomic_write_parquet(df_manifest, download_manifest_path, index=False)
         return
 
     # Estimate from archive sizes when available, otherwise from verified files
@@ -256,7 +295,7 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
     results = []
     
     # Save the manifest initially
-    df_manifest.to_parquet(download_manifest_path, index=False)
+    atomic_write_parquet(df_manifest, download_manifest_path, index=False)
     
     def worker(row_tuple):
         idx, row = row_tuple
@@ -266,7 +305,8 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
         sec_dir = config.raw_dir / f"sector_{sec:04d}" / "lightcurves"
         sec_dir.mkdir(parents=True, exist_ok=True)
         
-        dest_file = sec_dir / row["product_filename"]
+        product_filename = safe_product_filename(row["product_filename"])
+        dest_file = sec_dir / product_filename
         dl_url = row["download_url"]
         
         # Check if already exists and is readable
@@ -308,33 +348,38 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {executor.submit(worker, item): item for item in targets.iterrows()}
-        
-        for future in as_completed(futures):
-            idx, success, status, err_msg, sha, actual_size, attempts = future.result()
+            for future in as_completed(futures):
+                idx, success, status, err_msg, sha, actual_size, attempts = future.result()
             
-            # Update manifest row
-            df_manifest.at[idx, "final_status"] = status
-            df_manifest.at[idx, "download_status"] = status
-            df_manifest.at[idx, "failure_message"] = err_msg
-            df_manifest.at[idx, "failure_type"] = "" if success else status
-            now = datetime.now(timezone.utc).isoformat()
-            if not str(df_manifest.at[idx, "first_attempt"]):
-                df_manifest.at[idx, "first_attempt"] = now
-            df_manifest.at[idx, "last_attempt"] = now
-            df_manifest.at[idx, "sha256"] = sha
-            df_manifest.at[idx, "actual_size"] = actual_size
-            df_manifest.at[idx, "attempt_count"] = attempts
-            df_manifest.at[idx, "local_path"] = str(config.raw_dir / f"sector_{int(df_manifest.at[idx, 'sector']):04d}" / "lightcurves" / df_manifest.at[idx, 'product_filename']) if success else ""
-            
-            completed_count += 1
-            if completed_count % 100 == 0 or completed_count == len(targets):
-                elapsed = time.time() - t_start
-                rate = completed_count / elapsed if elapsed > 0 else 0
-                logger.info(f"Downloaded/Verified {completed_count}/{len(targets)} files ({rate:.2f} files/sec). Elapsed: {elapsed:.1f}s")
-                # Incremental write
-                df_manifest.to_parquet(download_manifest_path, index=False)
+                # This loop is intentionally inside the executor context so each
+                # completed result is durably checkpointed while peers are active.
+                df_manifest.at[idx, "final_status"] = status
+                df_manifest.at[idx, "download_status"] = status
+                df_manifest.at[idx, "failure_message"] = err_msg
+                df_manifest.at[idx, "failure_type"] = "" if success else status
+                now = datetime.now(timezone.utc).isoformat()
+                first_attempt = df_manifest.at[idx, "first_attempt"]
+                if pd.isna(first_attempt) or not str(first_attempt).strip():
+                    df_manifest.at[idx, "first_attempt"] = now
+                df_manifest.at[idx, "last_attempt"] = now
+                df_manifest.at[idx, "sha256"] = sha
+                df_manifest.at[idx, "actual_size"] = actual_size
+                df_manifest.at[idx, "attempt_count"] = attempts
+                df_manifest.at[idx, "local_path"] = str(
+                    config.raw_dir
+                    / f"sector_{int(df_manifest.at[idx, 'sector']):04d}"
+                    / "lightcurves"
+                    / safe_product_filename(df_manifest.at[idx, "product_filename"])
+                ) if success else ""
+
+                completed_count += 1
+                if completed_count % 100 == 0 or completed_count == len(targets):
+                    elapsed = time.time() - t_start
+                    rate = completed_count / elapsed if elapsed > 0 else 0
+                    logger.info(f"Downloaded/Verified {completed_count}/{len(targets)} files ({rate:.2f} files/sec). Elapsed: {elapsed:.1f}s")
+                    atomic_write_parquet(df_manifest, download_manifest_path, index=False)
     finally:
         session.close()
 
-    df_manifest.to_parquet(download_manifest_path, index=False)
+    atomic_write_parquet(df_manifest, download_manifest_path, index=False)
     logger.info("Download job finished.")

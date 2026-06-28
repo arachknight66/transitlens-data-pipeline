@@ -5,6 +5,7 @@ import logging
 import pandas as pd
 import numpy as np
 import yaml
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -123,59 +124,190 @@ def ingest_all_catalogs(config):
         logger.warning(f"TOI catalog not found at {toi_path}")
         
     # ----------------------------------------------------
-    # 2. Ingest TESS TCE Catalog (Sector 78 stats)
+    # 2. Ingest the MAST/ExoFOP TOI release. Unlike the Exoplanet
+    # Archive projection, this table retains the official Centroid Offset flag.
     # ----------------------------------------------------
-    tce_path = Path(config.tce_catalog)
-    if tce_path.exists():
-        logger.info(f"Ingesting TESS Sector 78 TCE Catalog from {tce_path}...")
-        csum = get_file_checksum(tce_path)
-        df_tce = pd.read_csv(tce_path)
-        
-        for idx, row in df_tce.iterrows():
-            raw_tic = row.get("ticid")
-            tic_id = normalize_tic_id(raw_tic)
+    mast_toi_path = Path(config.mast_toi_catalog)
+    if mast_toi_path.exists():
+        logger.info(f"Ingesting current MAST TOI release from {mast_toi_path}...")
+        csum = get_file_checksum(mast_toi_path)
+        df_mast_toi = pd.read_csv(mast_toi_path, comment="#", low_memory=False)
+        mast_mapping = {
+            "CP": ("exoplanet_transit", "strong"),
+            "KP": ("exoplanet_transit", "strong"),
+            "PC": ("exoplanet_transit", "medium"),
+            "EB": ("eclipsing_binary", "strong"),
+            "V": ("stellar_variability_or_other", "strong"),
+        }
+        for idx, row in df_mast_toi.iterrows():
+            tic_id = normalize_tic_id(row.get("TIC"))
             if tic_id is None:
                 continue
-                
+            disposition = str(row.get("TOI Disposition", "")).strip().upper()
+            centroid_raw = row.get("Centroid Offset", False)
+            centroid_offset = str(centroid_raw).strip().lower() in {"true", "1", "yes"}
+            if centroid_offset:
+                label_candidate, strength = "blend_contamination", "strong"
+                original = f"{disposition or 'UNSPECIFIED'}; CENTROID_OFFSET"
+                reason = "Official MAST TOI centroid-offset flag is true"
+            elif disposition in mast_mapping:
+                label_candidate, strength = mast_mapping[disposition]
+                original = disposition
+                reason = "Versioned MAST TOI disposition mapping"
+            else:
+                label_candidate, strength = "review_required", "medium"
+                original = disposition or "UNSPECIFIED"
+                reason = "MAST TOI disposition is not safe for supervised mapping"
+            evidence_rows.append({
+                "evidence_id": f"EVI-MTOI-{evidence_id_counter:06d}",
+                "tic_id": tic_id,
+                "canonical_label_candidate": label_candidate,
+                "original_label": original,
+                "original_disposition": disposition,
+                "source_catalog": "MAST_TOI_EXOFOP",
+                "source_version": "retrieved-2026-06-28",
+                "source_row_identifier": str(row.get("Full TOI ID", idx)),
+                "evidence_level": "catalog_authoritative",
+                "evidence_strength": strength,
+                "disposition_date": str(row.get("Updated", "")),
+                "target_name": f"TIC-{tic_id}",
+                "sector": None,
+                "ephemeris": str(row.get("Orbital Epoch Value", "")),
+                "period": float(row.get("Orbital Period (days) Value")) if pd.notnull(row.get("Orbital Period (days) Value")) else None,
+                "depth": float(row.get("Transit Depth Value")) / 1e6 if pd.notnull(row.get("Transit Depth Value")) else None,
+                "duration": float(row.get("Transit Duration (hours) Value")) / 24.0 if pd.notnull(row.get("Transit Duration (hours) Value")) else None,
+                "centroid_evidence": f"Centroid Offset={centroid_offset}",
+                "contamination_evidence": reason if centroid_offset else "",
+                "source_checksum": csum,
+                "ingestion_timestamp": ingest_time,
+                "adapter_version": adapter_version,
+                "notes": reason,
+            })
+            evidence_id_counter += 1
+    else:
+        logger.warning(f"MAST TOI catalog not found at {mast_toi_path}")
+
+    # ----------------------------------------------------
+    # 3. Ingest official SPOC TCE/DV statistics. A TCE alone remains weak;
+    # only concordant, conservative centroid diagnostics identify a blend.
+    # ----------------------------------------------------
+    centroid_policy = toi_policy.get("centroid_offset_policy", {})
+    min_sigma = float(centroid_policy.get("min_significance_sigma", 5.0))
+    min_offset = float(centroid_policy.get("min_offset_arcsec", 2.0))
+    tce_paths = [Path(config.tce_catalog), *map(Path, config.additional_tce_catalogs)]
+    for tce_path in tce_paths:
+        if not tce_path.exists():
+            logger.warning(f"TCE catalog not found at {tce_path}")
+            continue
+        logger.info(f"Ingesting official TESS TCE/DV statistics from {tce_path}...")
+        csum = get_file_checksum(tce_path)
+        df_tce = pd.read_csv(tce_path, comment="#", low_memory=False)
+        for idx, row in df_tce.iterrows():
+            tic_id = normalize_tic_id(row.get("ticid"))
+            if tic_id is None:
+                continue
             tce_id = str(row.get("tceid", ""))
-            fap = float(row.get("boot_fap", 1.0)) if pd.notnull(row.get("boot_fap")) else 1.0
-            
-            # Map candidate canonical label (TCE alone is weak candidate)
-            label_candidate = "exoplanet_transit"
-            strength = "weak"
-            notes = f"Threshold Crossing Event (TCE) {tce_id} in Sector 78 with FAP {fap:.2e}"
-            
+            sector_tokens = re.findall(r"s(\d{4})", str(row.get("sectors", "")))
+            sector_value = int(sector_tokens[0]) if len(sector_tokens) == 1 else None
+            diagnostics = []
+            passes = []
+            for prefix in ("tce_dicco_msky", "tce_ditco_msky"):
+                value = pd.to_numeric(row.get(prefix), errors="coerce")
+                error = pd.to_numeric(row.get(prefix + "_err"), errors="coerce")
+                significance = abs(value) / error if pd.notnull(value) and pd.notnull(error) and error > 0 else np.nan
+                passes.append(bool(pd.notnull(significance) and value >= min_offset and significance >= min_sigma))
+                diagnostics.append(f"{prefix}={value},err={error},sigma={significance}")
+            centroid_blend = all(passes)
+            if centroid_blend:
+                label_candidate = centroid_policy.get("resolved_label", "blend_contamination")
+                strength = centroid_policy.get("evidence_strength", "strong")
+                evidence_level = "catalog_authoritative"
+                original_disposition = "SPOC_DV_CONCORDANT_CENTROID_OFFSET"
+                notes = "Concordant official SPOC centroid diagnostics exceed versioned conservative thresholds"
+            else:
+                label_candidate, strength = "exoplanet_transit", "weak"
+                evidence_level = "catalog_weak"
+                original_disposition = "TCE"
+                notes = "TCE alone is weak evidence and is not a confirmed planet label"
             evidence_rows.append({
                 "evidence_id": f"EVI-TCE-{evidence_id_counter:06d}",
                 "tic_id": tic_id,
                 "canonical_label_candidate": label_candidate,
                 "original_label": "TCE",
-                "original_disposition": "TCE",
-                "source_catalog": "TESS_TCE_S0078",
-                "source_version": "1.0",
+                "original_disposition": original_disposition,
+                "source_catalog": f"TESS_TCE_{'S' + str(sector_value).zfill(4) if sector_value else 'MULTISECTOR'}",
+                "source_version": tce_path.name,
                 "source_row_identifier": tce_id,
-                "evidence_level": "catalog_weak",
+                "evidence_level": evidence_level,
                 "evidence_strength": strength,
                 "disposition_date": str(row.get("lastUpdate", "")),
                 "target_name": f"TIC-{tic_id}",
-                "sector": 78,
+                "sector": sector_value,
                 "ephemeris": str(row.get("tce_time0bt", "")),
                 "period": float(row.get("tce_period")) if pd.notnull(row.get("tce_period")) else None,
                 "depth": float(row.get("tce_depth")) / 1e6 if pd.notnull(row.get("tce_depth")) else None,
                 "duration": float(row.get("tce_duration")) / 24.0 if pd.notnull(row.get("tce_duration")) else None,
-                "centroid_evidence": f"dicco_msky: {row.get('tce_dicco_msky', '')}",
+                "centroid_evidence": "; ".join(diagnostics),
+                "contamination_evidence": notes if centroid_blend else "",
+                "source_checksum": csum,
+                "ingestion_timestamp": ingest_time,
+                "adapter_version": "1.1.0",
+                "notes": notes,
+            })
+            evidence_id_counter += 1
+
+    # ----------------------------------------------------
+    # 3. Ingest the vetted TESS Eclipsing Binary catalogue
+    # ----------------------------------------------------
+    eb_path = Path(config.eb_catalog)
+    if eb_path.exists():
+        logger.info(f"Ingesting TESS Eclipsing Binary Catalog from {eb_path}...")
+        csum = get_file_checksum(eb_path)
+        df_eb = pd.read_csv(eb_path, comment="#")
+
+        required = {"tess_id", "signal_id", "date_modified", "period", "sectors"}
+        missing = required - set(df_eb.columns)
+        if missing:
+            raise ValueError(f"TESS EB catalogue is missing required columns: {sorted(missing)}")
+
+        for idx, row in df_eb.iterrows():
+            tic_id = normalize_tic_id(row.get("tess_id"))
+            if tic_id is None:
+                continue
+            signal_id = str(row.get("signal_id", "1"))
+            evidence_rows.append({
+                "evidence_id": f"EVI-TEB-{evidence_id_counter:06d}",
+                "tic_id": tic_id,
+                "canonical_label_candidate": "eclipsing_binary",
+                "original_label": "eclipsing_binary",
+                "original_disposition": "vetted_tess_eb_catalogue",
+                "source_catalog": "TESS_EB_HLSP",
+                "source_version": "1.0",
+                "source_row_identifier": f"{tic_id}:{signal_id}",
+                "evidence_level": "catalog_authoritative",
+                "evidence_strength": "strong",
+                "disposition_date": str(row.get("date_modified", "")),
+                "target_name": f"TIC-{tic_id}",
+                # The source can list several sectors; preserve them rather than
+                # inventing one scalar observation sector.
+                "sector": None,
+                "ephemeris": str(row.get("bjd0", "")),
+                "period": float(row.get("period")) if pd.notnull(row.get("period")) else None,
+                "depth": float(row.get("prim_depth_pf")) if pd.notnull(row.get("prim_depth_pf")) else None,
+                "duration": float(row.get("prim_width_pf")) if pd.notnull(row.get("prim_width_pf")) else None,
+                "centroid_evidence": "",
                 "contamination_evidence": "",
                 "source_checksum": csum,
                 "ingestion_timestamp": ingest_time,
                 "adapter_version": adapter_version,
-                "notes": notes
+                "notes": f"Vetted TESS EB signal; catalogue sectors={row.get('sectors', '')}",
             })
             evidence_id_counter += 1
     else:
-        logger.warning(f"TCE catalog not found at {tce_path}")
+        logger.warning(f"TESS eclipsing-binary catalog not found at {eb_path}")
 
     # ----------------------------------------------------
-    # 3. Ingest Kepler Cumulative Catalog
+    # 4. Ingest Kepler Cumulative Catalog
     # ----------------------------------------------------
     cum_path = Path(config.cumulative_catalog)
     if cum_path.exists():
@@ -365,10 +497,12 @@ def ingest_all_catalogs(config):
     df_evidence["label_policy_version"] = config.label_policy_version
     df_evidence["provenance_reference"] = df_evidence["source_catalog"].map({
         "TESS_TOI": config.toi_catalog.name,
-        "TESS_TCE_S0078": config.tce_catalog.name,
+        "MAST_TOI_EXOFOP": config.mast_toi_catalog.name,
         "Kepler_Cumulative": config.cumulative_catalog.name,
         "NASA_Planets": config.planets_catalog.name,
     }).fillna("")
+    tce_mask = df_evidence["source_catalog"].str.startswith("TESS_TCE_", na=False)
+    df_evidence.loc[tce_mask, "provenance_reference"] = df_evidence.loc[tce_mask, "source_version"]
         
     output_path = manifests_dir / "label_evidence.parquet"
     df_evidence.to_parquet(output_path, index=False)
