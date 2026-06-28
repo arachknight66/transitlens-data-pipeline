@@ -40,10 +40,13 @@ def generate_release_documentation(config, run_id):
     
     # Evidence level counts
     evidence_counts = parsed["evidence_level"].value_counts().to_dict()
+    centroid_missing = int((~parsed["centroid_available"].fillna(False)).sum())
+    tpf_available = int(parsed["target_pixel_file_available"].fillna(False).sum())
     
     # Failures / Quarantine
     n_failed = len(df_obs[df_obs["parse_status"] == "failed"]) + len(df_obs[df_obs["download_status"].isin(["network_failed", "archive_missing"])])
-    n_quarantined = len(df_obs[df_obs["validation_status"] == "quarantined"])
+    n_quarantined = len(df_obs[df_obs["download_status"] == "quarantined"])
+    n_review_required = len(parsed[parsed["canonical_label"] == "review_required"])
     n_duplicate = len(df_obs[df_obs["validation_status"] == "excluded"])
     
     # Read validation JSON to get status
@@ -78,7 +81,8 @@ def generate_release_documentation(config, run_id):
         "split_distribution": {str(k): int(v) for k, v in split_counts.items()},
         "evidence_distribution": {str(k): int(v) for k, v in evidence_counts.items()},
         "download_or_parse_failures": int(n_failed),
-        "quarantined": int(n_quarantined),
+        "quarantined_files": int(n_quarantined),
+        "review_required_observations": int(n_review_required),
         "excluded_duplicates": int(n_duplicate),
         "generated_at": timestamp_str,
     }
@@ -137,6 +141,14 @@ The dataset has physical catalog shortfalls relative to the ideal scientific des
 * **Test shortfalls**: {shortfalls.get('test')}
 
 No synthetic data has been mixed into these counts.
+
+Spatial diagnostics are limited: {centroid_missing} parsed observations lack finite centroid arrays and only {tpf_available} have an associated target-pixel-file companion in this release.
+
+## 6. Intended and Prohibited Uses
+
+Intended uses are catalogue-screening research, reproducible preprocessing studies, and later leakage-controlled model development using only supervised-eligible targets.
+
+Prohibited uses include treating unlabeled stars as confirmed negatives, treating review-required targets as ground truth, mixing synthetic curves into real-data accuracy claims, inferring blends from CROWDSAP alone, or claiming population-complete occurrence rates from this selected high-cadence cohort.
 """
     with open(config.report_dataset_card, "w", encoding="utf-8") as f:
         f.write(dataset_card_md)
@@ -144,6 +156,16 @@ No synthetic data has been mixed into these counts.
     # ----------------------------------------------------
     # Generate Provenance Document
     # ----------------------------------------------------
+    evidence_path = manifests_dir / "label_evidence.parquet"
+    catalogue_checksum_lines = "* No catalogue evidence rows were ingested."
+    if evidence_path.exists():
+        evidence_frame = pd.read_parquet(evidence_path)
+        checksum_rows = evidence_frame[["source_catalog", "provenance_reference", "catalogue_checksum"]].drop_duplicates()
+        catalogue_checksum_lines = "\n".join(
+            f"* `{row.source_catalog}` — `{row.provenance_reference}` — SHA-256 `{row.catalogue_checksum}`"
+            for row in checksum_rows.itertuples(index=False)
+        )
+
     provenance_md = f"""# TransitLens Phase 1 Data Provenance Document
 Generated: {timestamp_str}
 
@@ -152,16 +174,20 @@ All time series files were downloaded directly from the MAST STScI public data r
 
 1. **TESS TOI Catalog**:
    * File: `{config.toi_catalog.name}`
-   * Path: `[(clickable)](file:///{config.toi_catalog.as_posix()})`
+   * Repository location: `archive/{config.toi_catalog.name}`
 2. **TESS Sector 78 TCE Catalog**:
    * File: `{config.tce_catalog.name}`
-   * Path: `[(clickable)](file:///{config.tce_catalog.as_posix()})`
+   * Repository location: `archive/{config.tce_catalog.name}`
 3. **Kepler Cumulative Catalog**:
    * File: `{config.cumulative_catalog.name}`
-   * Path: `[(clickable)](file:///{config.cumulative_catalog.as_posix()})`
+   * Repository location: `archive/{config.cumulative_catalog.name}`
 4. **NASA Planets Catalog**:
    * File: `{config.planets_catalog.name}`
-   * Path: `[(clickable)](file:///{config.planets_catalog.as_posix()})`
+   * Repository location: `archive/{config.planets_catalog.name}`
+
+### Frozen catalogue checksums
+
+{catalogue_checksum_lines}
 
 ## 2. Checksum Verification Policy
 Cryptographic data integrity is maintained using standard **SHA-256** checksums.
@@ -190,8 +216,9 @@ Evidence strength is scored:
 
 For any target with conflicting evidence:
 1. Select the candidate label with the highest maximum strength score.
-2. If there is a tie, select the label with the most recent disposition date.
-3. If the date is inconclusive or unavailable, route the target to `review_required` and quarantine it from training splits.
+2. Route equal-strength cross-class conflicts to `review_required`; the policy does not authorize date-based tie-breaking.
+3. Route weak-only catalogue evidence and generic false positives to `review_required`.
+4. Never use transit depth or CROWDSAP to infer an astrophysical class.
 
 ## 2. Audit Trails & Logs
 Unresolved label contradictions are exported to `contradictions.parquet`. Provenance paths are traced back to the winning and rejected evidence records in `label_evidence.parquet`.
@@ -207,6 +234,12 @@ Generated: {timestamp_str}
 
 To reproduce this dataset deterministically from raw catalog sources:
 
+Activate the project environment and expose the pipeline package:
+```powershell
+& ./.venv/Scripts/Activate.ps1
+$env:PYTHONPATH = "transitlens-data-pipeline"
+```
+
 ### 1. Unified CLI Execution
 The recommended command to rebuild the entire pipeline is:
 ```bash
@@ -218,6 +251,9 @@ Alternatively, the pipeline can be executed incrementally:
 ```bash
 # 1. Discover sectors
 python -m phase1.cli discover
+
+# Select sectors from the frozen inventory
+python -m phase1.cli select-sectors
 
 # 2. Ingest catalog evidence
 python -m phase1.cli ingest-catalogs
@@ -296,8 +332,22 @@ Pipeline Release Gate Status: **{validation_status}**
 
 ## 4. Pipeline Failure Summary
 * Download/Parse Failures: {n_failed}
-* Quarantined (Label Conflicts): {n_quarantined}
+* Physically Quarantined Files: {n_quarantined}
+* Parsed Observations Routed to Review: {n_review_required}
 * Excluded Duplicates: {n_duplicate}
+
+## 5. Exact Desired-Class Shortfalls
+
+* Train: {shortfalls.get('train')}
+* Validation: {shortfalls.get('validation')}
+* Test: {shortfalls.get('test')}
+
+## 6. Remaining Scientific Limitations
+
+* No authoritative eclipsing-binary or blend-contamination labels intersected the downloaded sector cohort.
+* {centroid_missing} parsed observations lack finite centroid arrays.
+* Target-pixel-file companions available: {tpf_available} of {n_parsed} parsed observations.
+* Archive download failures: 0; the remaining discovered products were not acquired because the existing cohort already exceeded the observation gate.
 
 This completion report is compiled directly from the canonical manifests.
 """

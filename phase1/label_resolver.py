@@ -100,7 +100,8 @@ def resolve_labels(config):
         
         # Equal-strength class conflicts are never balance- or date-broken.
         # The versioned policy does not authorize a source/date precedence.
-        if len(winning_labels) > 1:
+        is_contradiction = len(winning_labels) > 1
+        if is_contradiction:
             winner = "review_required"
             resolution_reason = f"Equal-strength contradiction between {winning_labels}; policy requires review."
         else:
@@ -126,15 +127,16 @@ def resolve_labels(config):
             )
             max_level = "catalog_authoritative" if "catalog_authoritative" in winning_ev_rows["evidence_level"].tolist() else "catalog_weak"
             
-            # Log contradiction
-            conflict_desc = f"Equal strength conflict for TIC-{tic_id} between labels: {list(label_scores.keys())}"
-            contradiction_rows.append({
-                "tic_id": int(tic_id),
-                "conflict_labels": list(label_scores.keys()),
-                "conflict_description": conflict_desc,
-                "evidence_ids": winning_ids,
-                "source_catalogs": winning_ev_rows["source_catalog"].tolist()
-            })
+            conflict_desc = ""
+            if is_contradiction:
+                conflict_desc = f"Equal strength conflict for TIC-{tic_id} between labels: {list(label_scores.keys())}"
+                contradiction_rows.append({
+                    "tic_id": int(tic_id),
+                    "conflict_labels": list(label_scores.keys()),
+                    "conflict_description": conflict_desc,
+                    "evidence_ids": winning_ids,
+                    "source_catalogs": winning_ev_rows["source_catalog"].tolist()
+                })
         else:
             winning_ev_rows = valid_ev[valid_ev["canonical_label_candidate"] == winner]
             rejected_ev_rows = valid_ev[valid_ev["canonical_label_candidate"] != winner]

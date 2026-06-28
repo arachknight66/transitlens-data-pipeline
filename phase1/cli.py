@@ -152,7 +152,7 @@ def main():
     parser_arg.add_argument("command", choices=[
         "discover", "select-sectors", "ingest-catalogs", "resolve-labels", "download", 
         "verify-downloads", "process", "build-splits", "build-manifest", 
-        "validate", "report", "status", "run-all"
+        "validate", "report", "final-verify", "status", "run-all"
     ], help="Stage command to execute")
     parser_arg.add_argument("--config", default=None, help="Path to config YAML")
     parser_arg.add_argument("--run-id", default=None, help="Run ID for tracking execution")
@@ -252,6 +252,15 @@ def main():
                 
         elif args.command == "report":
             reporting.generate_release_documentation(config, run_id)
+
+        elif args.command == "final-verify":
+            from phase1.final_verification import run_final_verification
+            result = run_final_verification(config)
+            logger.info(f"Independent final verification status: {result['status']}")
+            if result["status"] == "FAIL":
+                sys.exit(1)
+            if result["status"] == "PARTIAL":
+                sys.exit(2)
             
         elif args.command == "status":
             logger.info(f"Run ID: {run_id}")
@@ -283,11 +292,23 @@ def main():
             resolver.resolve_labels(config)
             
             logger.info("--- [Stage 4/9] Concurrent Downloader ---")
-            downloader.run_download(
-                config, limit=args.limit, sector=args.sector, 
-                resume=args.resume, retry_failures=args.retry_failures,
-                dry_run=args.dry_run
-            )
+            existing_verified = 0
+            existing_download_manifest = config.manifests_dir / "download_manifest.parquet"
+            if existing_download_manifest.exists():
+                existing_downloads = pd.read_parquet(existing_download_manifest)
+                status_column = "download_status" if "download_status" in existing_downloads else "final_status"
+                existing_verified = int((existing_downloads[status_column].isin(["verified", "processed"])).sum())
+            if existing_verified >= config.minimum_successful_observations and args.limit is None:
+                logger.info(
+                    f"Skipping additional acquisition: {existing_verified} verified products already meet "
+                    f"the {config.minimum_successful_observations} observation target."
+                )
+            else:
+                downloader.run_download(
+                    config, limit=args.limit, sector=args.sector,
+                    resume=args.resume, retry_failures=args.retry_failures,
+                    dry_run=args.dry_run
+                )
             
             logger.info("--- [Stage 5/9] FITS Parsing & Normalization ---")
             run_process_stage(config, limit=args.limit, run_id=run_id)
@@ -308,6 +329,11 @@ def main():
             
             logger.info("--- Generation of documentation reports ---")
             reporting.generate_release_documentation(config, run_id)
+
+            from phase1.final_verification import run_final_verification
+            final_result = run_final_verification(config)
+            if final_result["status"] == "FAIL":
+                res["status"] = "FAIL"
             
             # Save end time
             run_info["end_time"] = datetime.now(timezone.utc).isoformat()

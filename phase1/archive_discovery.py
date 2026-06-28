@@ -183,6 +183,11 @@ The discovery phase successfully queried MAST for SPOC high-cadence time-series 
     for s in sector_stats:
         report_md += f"| {s['sector']} | {s['mission']} | {s['cadence']} | {s['product_author']} | {s['n_unique_tics']} | {s['n_observations']} | {s['estimated_download_size_gb']:.3f} | `{s['cache_file']}` |\n"
         
+    ranked_stats = sorted(sector_stats, key=lambda item: (-item["n_observations"], item["sector"]))
+    ranking_lines = "\n".join(
+        f"{rank}. **Sector {item['sector']}**: {item['n_observations']} eligible SPOC observations."
+        for rank, item in enumerate(ranked_stats, start=1)
+    )
     report_md += f"""
 ### Cohort Summary:
 * **Total Discovered TIC-Sector Observations**: {total_obs}
@@ -192,12 +197,10 @@ The discovery phase successfully queried MAST for SPOC high-cadence time-series 
 
 ## 2. Selection Rationale & Sector Rankings
 
-Sectors were ranked based on the available short-cadence SPOC observations to form a coherent sector-scale screening cohort:
-1. **Sector 78**: {sector_stats[0]['n_observations'] if len(sector_stats) > 0 else 0} SPOC observations.
-2. **Sector 79**: {sector_stats[1]['n_observations'] if len(sector_stats) > 1 else 0} SPOC observations.
-3. **Sector 77**: {sector_stats[2]['n_observations'] if len(sector_stats) > 2 else 0} SPOC observations.
+Sectors were ranked by eligible high-cadence SPOC product count:
+{ranking_lines}
 
-By combining Sectors 78, 79, and 77, we discover a pool of **{total_obs}** candidate observations. This provides a safety margin of ~{total_obs - 20000} targets to absorb any network timeouts, corrupted files, data gaps, or low-quality exclusions, ensuring the pipeline meets the ≥20,000 successfully parsed observations gate.
+The configured sectors contain **{total_obs}** candidate observations, a discovery surplus of **{total_obs - config.minimum_successful_observations}** over the configured gate. This margin is not evidence that the parse gate passed.
 
 This cohort represents a full-sector screening population rather than cherry-picked confirmed planets, preserving scientific defensibility.
 """

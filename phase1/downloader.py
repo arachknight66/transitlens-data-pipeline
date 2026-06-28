@@ -13,6 +13,27 @@ import shutil
 
 logger = logging.getLogger(__name__)
 
+
+def ensure_download_manifest_contract(frame, run_id=""):
+    """Add nullable provenance fields when importing a legacy manifest.
+
+    Empty/``legacy_unknown`` values are explicit unknowns; no acquisition facts
+    are fabricated during migration.
+    """
+    frame = frame.copy()
+    defaults = {
+        "expected_size": pd.NA,
+        "failure_type": "",
+        "first_attempt": "",
+        "last_attempt": "",
+        "download_run_id": run_id or "legacy_manifest_import",
+        "code_version": "1.1.0" if run_id else "legacy_unknown",
+    }
+    for column, default in defaults.items():
+        if column not in frame.columns:
+            frame[column] = default
+    return frame
+
 def compute_sha256(filepath):
     """Computes SHA-256 checksum of a file in chunks."""
     sha = hashlib.sha256()
@@ -160,6 +181,7 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
                 df_manifest[column] = df_manifest["final_status"].map({"processed": "success"}).fillna(default)
             else:
                 df_manifest[column] = default
+    df_manifest = ensure_download_manifest_contract(df_manifest)
 
     # Filter out failures if we are NOT retrying failures
     mask_to_download = df_manifest["final_status"] == "pending"
