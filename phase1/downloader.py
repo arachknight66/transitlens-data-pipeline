@@ -144,7 +144,7 @@ def download_file_with_retry(download_url, dest_path, retries=3, backoff=1.5, ti
                 
     return False, "network_failed", f"Failed after {retries} retries. Last error: {last_err}", ""
 
-def run_download(config, limit=None, sector=None, resume=True, retry_failures=False, dry_run=False, verify_only=False):
+def run_download(config, limit=None, sector=None, resume=True, retry_failures=False, dry_run=False, verify_only=False, supplement_only=False):
     """
     Orchestrates the concurrent downloading and verification process.
     """
@@ -216,6 +216,14 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
                 df_manifest[column] = df_manifest["final_status"].map({"processed": "success"}).fillna(default)
             else:
                 df_manifest[column] = default
+    # Rows newly introduced by an outer resume merge have null stage fields
+    # even when the columns already existed in the prior manifest.
+    df_manifest["download_status"] = df_manifest["download_status"].fillna(
+        df_manifest["final_status"].replace({"processed": "verified"})
+    ).fillna("pending")
+    df_manifest["parse_status"] = df_manifest["parse_status"].fillna(
+        df_manifest["final_status"].map({"processed": "success"})
+    ).fillna("pending")
     df_manifest = ensure_download_manifest_contract(df_manifest)
 
     # Filter out failures if we are NOT retrying failures
@@ -281,6 +289,9 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
     targets = df_manifest[mask_to_download].copy()
     if sector is not None:
         targets = targets[targets["sector"] == int(sector)].copy()
+    if supplement_only:
+        supplement = targets.get("supplementary_label", pd.Series(index=targets.index, dtype="object"))
+        targets = targets[supplement.notna()].copy()
         
     if limit is not None:
         targets = targets.head(int(limit))

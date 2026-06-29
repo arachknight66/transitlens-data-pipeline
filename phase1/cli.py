@@ -154,7 +154,7 @@ def main():
         "discover", "select-sectors", "ingest-catalogs", "resolve-labels", "download", 
         "verify-downloads", "process", "build-splits", "build-manifest", 
         "validate", "report", "final-verify", "status", "run-all",
-        "discover-dvr-xml", "download-dvr-xml"
+        "discover-dvr-xml", "download-dvr-xml", "discover-supplement"
     ], help="Stage command to execute")
     parser_arg.add_argument("--config", default=None, help="Path to config YAML")
     parser_arg.add_argument("--run-id", default=None, help="Run ID for tracking execution")
@@ -165,6 +165,7 @@ def main():
     parser_arg.add_argument("--concurrency", type=int, default=None, help="Download concurrency")
     parser_arg.add_argument("--dry-run", action="store_true", default=False, help="Dry run mode")
     parser_arg.add_argument("--verify-only", action="store_true", default=False, help="Verify files without downloading")
+    parser_arg.add_argument("--supplement-only", action="store_true", default=False, help="Restrict downloading to the frozen labelled supplementary cohort")
     
     args = parser_arg.parse_args()
     
@@ -213,7 +214,7 @@ def main():
             downloader.run_download(
                 config, limit=args.limit, sector=args.sector, 
                 resume=args.resume, retry_failures=args.retry_failures,
-                dry_run=args.dry_run
+                dry_run=args.dry_run, supplement_only=args.supplement_only
             )
             
         elif args.command == "verify-downloads":
@@ -273,6 +274,11 @@ def main():
             from phase1.dv_xml import download_targeted_dvr_xml
             manifest = download_targeted_dvr_xml(config, concurrency=args.concurrency or 4)
             logger.info(f"DVR XML statuses: {manifest['status'].value_counts().to_dict()}")
+
+        elif args.command == "discover-supplement":
+            from phase1.supplementary_cohort import discover_and_merge_supplement
+            selected, summary = discover_and_merge_supplement(config)
+            logger.info(f"Selected {len(selected)} supplementary products: {summary}")
             
         elif args.command == "status":
             logger.info(f"Run ID: {run_id}")

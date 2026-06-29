@@ -1,35 +1,23 @@
-# reporting.py
-# ------------
-# Human-readable markdown reports and diagnostic logs generation for Phase 2.
-
+"""Single-source Phase 2 release reporting; never hardcodes completion."""
 from __future__ import annotations
+from datetime import datetime, timezone
 import json
-import logging
-from pathlib import Path
+import numpy as np
 
-logger = logging.getLogger(__name__)
+def _json_default(value):
+    if isinstance(value, np.generic): return value.item()
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 def generate_phase2_report(config, run_id: str, results: dict) -> None:
-    """Assembles all evaluation summaries and writes phase2_scientific_report.md."""
-    m = config.manifests_dir
-    report_path = m / "phase2_scientific_report.md"
-    
-    # Save a JSON file as well
-    report_json_path = m / "phase2_validation_report.json"
-    with open(report_json_path, "w") as f:
-        json.dump(results, f, indent=2)
-        
-    md_content = f"""# TransitLens Phase 2 Scientific Report
-Run ID: {run_id}
-Status: COMPLETE
-
-## Executive Summary
-This report summarizes the eclipsing binary and blend contamination diagnostic performance for the Phase 2 vetting pipeline.
-
-## Evaluation Results
-```json
-{json.dumps(results, indent=2)}
-```
-"""
-    report_path.write_text(md_content)
-    logger.info(f"Generated Phase 2 report at {report_path}")
+    m=config.manifests_dir
+    record={"run_id":run_id,"generated_at":datetime.now(timezone.utc).isoformat(),**results}
+    (m/"phase2_validation_report.json").write_text(json.dumps(record,indent=2,default=_json_default),encoding="utf-8")
+    metrics=record.get("evaluation",{})
+    blockers=record.get("errors",[])+record.get("warnings",[])+record.get("gate_failures",[])
+    lines=["# TransitLens Phase 2 scientific report","",f"**Status: {record.get('status','PARTIAL')}**","",
+           "Phase 2 diagnostics are risk evidence, not calibrated astrophysical probabilities and not planet confirmation.","",
+           "## Frozen evaluation record","","```json",json.dumps(metrics,indent=2,default=_json_default),"```","","## Release blockers","",]
+    lines += [f"- {item}" for item in blockers] or ["- None"]
+    lines += ["","## Scientific safeguards","",
+              "Official features use TransitLens-detected ephemerides, preserve target-disjoint Phase 1 splits, keep labels in a separate metadata table, and represent unavailable measurements as null plus availability flags.",""]
+    (m/"phase2_scientific_report.md").write_text("\n".join(lines),encoding="utf-8")

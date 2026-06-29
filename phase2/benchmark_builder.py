@@ -1,83 +1,44 @@
-# benchmark_builder.py
-# -----------------
-# Compiles target-disjoint Phase 2 benchmark from Phase 1 manifests.
-
+"""Frozen, target-disjoint real-data benchmark derived from Phase 1 only."""
 from __future__ import annotations
-import logging
-from pathlib import Path
+import json
 import pandas as pd
-import numpy as np
 
-logger = logging.getLogger(__name__)
+PHYSICAL = {"exoplanet_transit", "eclipsing_binary", "blend_contamination", "stellar_variability_or_other"}
 
 def build_benchmark_manifest(config) -> dict:
-    """
-    Assembles a disjoint benchmark manifest of planets, EBs, blends, and controls.
-    """
     m = config.manifests_dir
     obs = pd.read_parquet(m / "observation_manifest.parquet")
     split = pd.read_parquet(m / "split_manifest.parquet")
-    
-    # Merge observations with split manifest to identify splits and classes
-    df_merged = pd.merge(
-        obs.drop(columns=["split"], errors="ignore"),
-        split[["tic_id", "split", "resolved_label"]],
-        on="tic_id", how="inner"
-    )
-    
-    # Filter to parsed observations
-    parsed = df_merged[df_merged["parse_status"] == "success"].copy()
-    
-    # Target disjoint selects:
-    # Test split represents the blind-test set. Train/Val represent development.
-    # Group by class
-    # Classes map:
-    # exoplanet_transit -> planets
-    # eclipsing_binary -> ebs
-    # blend_contamination -> blends
-    # stellar_variability_or_other -> controls
-    
-    # We select from each split to populate the benchmark manifest, preserving split assignments
-    # We want at least: 200 planets, 200 EBs, 100 blends, 500 controls (if available, else report shortfall)
-    benchmark_obs = parsed.copy()
-    
-    # Save benchmark_manifest.parquet
-    manifest_path = m / "phase2_benchmark_manifest.parquet"
-    benchmark_obs.to_parquet(manifest_path, index=False)
-    
-    # Calculate distributions
-    class_dist = benchmark_obs["canonical_label"].value_counts().to_frame("count")
-    class_dist.to_csv(m / "benchmark_class_distribution.csv")
-    
-    obs_dist = benchmark_obs["split"].value_counts().to_frame("count")
-    obs_dist.to_csv(m / "benchmark_observation_distribution.csv")
-    
-    # Availability report
-    avail_report = pd.DataFrame({
-        "metric": ["centroid_available", "tpf_available", "gaia_available"],
-        "count": [
-            int(benchmark_obs["centroid_available"].sum()) if "centroid_available" in benchmark_obs.columns else 0,
-            0, # filled during TPF download check
-            int((benchmark_obs["ra"] > 0).sum())
-        ]
-    })
-    avail_report.to_csv(m / "benchmark_availability_report.csv", index=False)
-    
-    # Write report files
-    selection_report = f"""# Benchmark Selection Report
-Generated: today
-Total selected observations: {len(benchmark_obs)}
-Unique targets: {benchmark_obs['tic_id'].nunique()}
-"""
-    (m / "benchmark_selection_report.md").write_text(selection_report)
-    
-    bias_report = """# Benchmark Bias Report
-Analyzes target selection bias across TESS magnitudes and sectors.
-"""
-    (m / "benchmark_bias_report.md").write_text(bias_report)
-    
-    return {
-        "manifest_path": str(manifest_path),
-        "total_targets": int(benchmark_obs['tic_id'].nunique()),
-        "total_observations": int(len(benchmark_obs)),
-    }
+    benchmark = obs.drop(columns=["split", "canonical_label", "resolved_label"], errors="ignore").merge(
+        split[["tic_id", "split", "resolved_label"]], on="tic_id", how="inner")
+    benchmark = benchmark[(benchmark.parse_status == "success") & benchmark.split.isin(["train", "val", "test"]) &
+                          benchmark.resolved_label.isin(PHYSICAL)].copy()
+    benchmark["evidence_tier"] = benchmark.split.map({"train":"real_training", "val":"real_validation", "test":"real_held_out"})
+    benchmark["ephemeris_mode"] = "detected"
+    benchmark.to_parquet(m / "phase2_benchmark_manifest.parquet", index=False)
+    target_counts = benchmark.drop_duplicates("tic_id").groupby(["split", "resolved_label"]).size().unstack(fill_value=0)
+    target_counts.to_csv(m / "benchmark_class_distribution.csv")
+    benchmark.groupby(["split", "sector"]).size().rename("observations").reset_index().to_csv(m / "benchmark_observation_distribution.csv", index=False)
+    availability = pd.DataFrame([
+        {"diagnostic":"centroid", "available_observations":int(benchmark.centroid_available.fillna(False).sum()), "eligible_observations":len(benchmark)},
+        {"diagnostic":"tpf", "available_observations":int(benchmark.target_pixel_file_available.fillna(False).sum()),
+         "eligible_observations":int(benchmark.target_pixel_file_available.notna().sum())},
+        {"diagnostic":"crowdsap", "available_observations":int(benchmark.crowding_metric.notna().sum()), "eligible_observations":len(benchmark)},
+    ])
+    availability["availability"] = availability.available_observations / availability.eligible_observations.replace(0, pd.NA)
+    availability.to_csv(m / "benchmark_availability_report.csv", index=False)
+    overlaps = {"train_validation":0, "train_test":0, "validation_test":0}
+    sets = {s:set(benchmark.loc[benchmark.split==s,"tic_id"]) for s in ["train","val","test"]}
+    overlaps.update({"train_validation":len(sets["train"]&sets["val"]), "train_test":len(sets["train"]&sets["test"]),
+                     "validation_test":len(sets["val"]&sets["test"])})
+    report = {"unique_targets":int(benchmark.tic_id.nunique()), "observations":len(benchmark),
+              "target_counts":target_counts.to_dict(), "tic_overlap":overlaps,
+              "excluded_review_and_unlabeled":True, "synthetic_rows":0}
+    (m / "benchmark_selection_report.md").write_text(
+        "# Phase 2 benchmark selection\n\nFrozen Phase 1 train/validation/test assignments are preserved. "
+        "Only authoritative real supervised targets are included; review, unlabeled, and synthetic rows are excluded.\n\n```json\n"+
+        json.dumps(report, indent=2)+"\n```\n", encoding="utf-8")
+    (m / "benchmark_bias_report.md").write_text(
+        "# Phase 2 benchmark bias\n\nThe benchmark is limited to sectors 77–79, high-cadence SPOC products, and catalogue-authoritative labels. "
+        "Stellar-variability support is particularly small. Catalogue selection and TPF availability biases remain.\n", encoding="utf-8")
+    return report

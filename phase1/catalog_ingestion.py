@@ -224,7 +224,12 @@ def ingest_all_catalogs(config):
                 continue
             tce_id = str(row.get("tceid", ""))
             sector_tokens = re.findall(r"s(\d{4})", str(row.get("sectors", "")))
-            sector_value = int(sector_tokens[0]) if len(sector_tokens) == 1 else None
+            # Multi-sector search tables encode the search endpoint (for
+            # example s0096) in every row. It is not an observation-sector
+            # assignment and must never be used for sector enrichment ranking.
+            filename_range = re.search(r"s(\d{4})-s(\d{4})", tce_path.name)
+            is_multisector = bool(filename_range and filename_range.group(1) != filename_range.group(2))
+            sector_value = int(sector_tokens[0]) if len(sector_tokens) == 1 and not is_multisector else None
             diagnostics = []
             passes = []
             for prefix in ("tce_dicco_msky", "tce_ditco_msky"):
