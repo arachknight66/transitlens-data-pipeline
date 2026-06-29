@@ -39,7 +39,8 @@ def materialize_features(config, limit: int | None = None) -> dict:
     
     # Merge splits and observations
     df_merged = pd.merge(
-        obs_manifest, split_manifest[["tic_id", "split", "resolved_label"]],
+        obs_manifest.drop(columns=["split"], errors="ignore"),
+        split_manifest[["tic_id", "split", "resolved_label"]],
         on="tic_id", how="inner"
     )
     

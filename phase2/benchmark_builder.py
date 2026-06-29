@@ -20,7 +20,8 @@ def build_benchmark_manifest(config) -> dict:
     
     # Merge observations with split manifest to identify splits and classes
     df_merged = pd.merge(
-        obs, split[["tic_id", "split", "resolved_label"]],
+        obs.drop(columns=["split"], errors="ignore"),
+        split[["tic_id", "split", "resolved_label"]],
         on="tic_id", how="inner"
     )
     
