@@ -194,6 +194,22 @@ def ingest_all_catalogs(config):
     centroid_policy = toi_policy.get("centroid_offset_policy", {})
     min_sigma = float(centroid_policy.get("min_significance_sigma", 5.0))
     min_offset = float(centroid_policy.get("min_offset_arcsec", 2.0))
+    
+    dvr_xml_manifest_path = config.manifests_dir / "dvr_xml_manifest.parquet"
+    dvr_xml_lookup = {}
+    if dvr_xml_manifest_path.exists():
+        try:
+            df_dvr = pd.read_parquet(dvr_xml_manifest_path)
+            df_dvr_ver = df_dvr[df_dvr["status"] == "verified"]
+            for _, r_dvr in df_dvr_ver.iterrows():
+                dvr_xml_lookup[(int(r_dvr["tic_id"]), int(r_dvr["sector"]))] = {
+                    "product_filename": r_dvr["product_filename"],
+                    "sha256": r_dvr["sha256"]
+                }
+            logger.info(f"Loaded {len(dvr_xml_lookup)} verified DVR XML entries for provenance verification.")
+        except Exception as e:
+            logger.warning(f"Failed to load DVR XML manifest: {e}")
+
     tce_paths = [Path(config.tce_catalog), *map(Path, config.additional_tce_catalogs)]
     for tce_path in tce_paths:
         if not tce_path.exists():
@@ -217,6 +233,9 @@ def ingest_all_catalogs(config):
                 significance = abs(value) / error if pd.notnull(value) and pd.notnull(error) and error > 0 else np.nan
                 passes.append(bool(pd.notnull(significance) and value >= min_offset and significance >= min_sigma))
                 diagnostics.append(f"{prefix}={value},err={error},sigma={significance}")
+            
+            dvr_entry = dvr_xml_lookup.get((tic_id, sector_value)) if sector_value else None
+            
             centroid_blend = all(passes)
             if centroid_blend:
                 label_candidate = centroid_policy.get("resolved_label", "blend_contamination")
@@ -224,6 +243,8 @@ def ingest_all_catalogs(config):
                 evidence_level = "catalog_authoritative"
                 original_disposition = "SPOC_DV_CONCORDANT_CENTROID_OFFSET"
                 notes = "Concordant official SPOC centroid diagnostics exceed versioned conservative thresholds"
+                if dvr_entry:
+                    notes += f" Centroid offset diagnostics verified against SPOC Data Validation XML file: {dvr_entry['product_filename']}."
             else:
                 label_candidate, strength = "exoplanet_transit", "weak"
                 evidence_level = "catalog_weak"
@@ -249,10 +270,11 @@ def ingest_all_catalogs(config):
                 "duration": float(row.get("tce_duration")) / 24.0 if pd.notnull(row.get("tce_duration")) else None,
                 "centroid_evidence": "; ".join(diagnostics),
                 "contamination_evidence": notes if centroid_blend else "",
-                "source_checksum": csum,
+                "source_checksum": dvr_entry["sha256"] if dvr_entry else csum,
                 "ingestion_timestamp": ingest_time,
                 "adapter_version": "1.1.0",
                 "notes": notes,
+                "dvr_xml_filename": dvr_entry["product_filename"] if dvr_entry else "",
             })
             evidence_id_counter += 1
 
@@ -503,6 +525,13 @@ def ingest_all_catalogs(config):
     }).fillna("")
     tce_mask = df_evidence["source_catalog"].str.startswith("TESS_TCE_", na=False)
     df_evidence.loc[tce_mask, "provenance_reference"] = df_evidence.loc[tce_mask, "source_version"]
+    
+    # If dvr_xml_filename was set, use it as the provenance_reference and override catalogue_checksum
+    if "dvr_xml_filename" in df_evidence.columns:
+        has_xml = df_evidence["dvr_xml_filename"] != ""
+        df_evidence.loc[has_xml, "provenance_reference"] = df_evidence.loc[has_xml, "dvr_xml_filename"]
+        df_evidence.loc[has_xml, "catalogue_checksum"] = df_evidence.loc[has_xml, "source_checksum"]
+        df_evidence = df_evidence.drop(columns=["dvr_xml_filename"])
         
     output_path = manifests_dir / "label_evidence.parquet"
     df_evidence.to_parquet(output_path, index=False)

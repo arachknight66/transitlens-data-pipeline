@@ -162,10 +162,6 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
         logger.warning("Discovery manifest is empty.")
         return
         
-    # Filter by sector if requested
-    if sector is not None:
-        df_disc = df_disc[df_disc["sector"] == int(sector)].copy()
-        
     logger.info(f"Loaded {len(df_disc)} discovered observations.")
     
     # Load or initialize download manifest
@@ -182,9 +178,9 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
             "processed_sha256",
         ]
         available_state = [c for c in state_columns if c in df_dl.columns]
-        df_disc = df_disc.drop(columns=[c for c in available_state if c in df_disc.columns])
+        df_disc_clean = df_disc.drop(columns=[c for c in available_state if c in df_disc.columns], errors="ignore")
         merged = pd.merge(
-            df_disc, df_dl[["obs_id", *available_state]], on="obs_id", how="left"
+            df_disc_clean, df_dl[["obs_id", *available_state]], on="obs_id", how="left"
         )
         # Fill NaNs
         merged["final_status"] = merged["final_status"].fillna("pending")
@@ -234,14 +230,43 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
         corrupt_count = 0
         
         for idx, row in df_manifest.iterrows():
+            if sector is not None and row["sector"] != int(sector):
+                continue
+            
             lpath = row["local_path"]
-            if lpath and os.path.exists(lpath):
+            is_empty = pd.isna(lpath) or not str(lpath).strip()
+            sec = int(row["sector"])
+            product_filename = safe_product_filename(row["product_filename"])
+            expected_lpath = config.raw_dir / f"sector_{sec:04d}" / "lightcurves" / product_filename
+            
+            # Heal local_path if empty/missing but file exists on disk
+            if (is_empty or not os.path.exists(str(lpath))) and expected_lpath.exists():
+                lpath = str(expected_lpath)
+                df_manifest.at[idx, "local_path"] = lpath
+                is_empty = False
+
+            if not is_empty and os.path.exists(str(lpath)):
                 is_ok, err = verify_fits_readable(lpath)
                 if is_ok:
                     df_manifest.at[idx, "final_status"] = "verified"
                     df_manifest.at[idx, "download_status"] = "verified"
                     df_manifest.at[idx, "sha256"] = compute_sha256(lpath)
                     df_manifest.at[idx, "actual_size"] = os.path.getsize(lpath)
+                    
+                    # Also restore parse_status if processed metadata JSON sidecar exists
+                    tic_id = int(row["tic_id"])
+                    sidecar = config.processed_dir / "metadata" / f"TIC-{tic_id:012d}_sector-{sec:04d}_lc_meta.json"
+                    if sidecar.exists():
+                        try:
+                            import json
+                            with open(sidecar, "r", encoding="utf-8") as handle:
+                                meta = json.load(handle)
+                            df_manifest.at[idx, "parse_status"] = "success"
+                            df_manifest.at[idx, "processed_path"] = meta.get("processed_path", "")
+                            df_manifest.at[idx, "processed_sha256"] = meta.get("processed_sha256", "")
+                        except Exception as e:
+                            logger.warning(f"Error reading sidecar {sidecar} for TIC {tic_id}: {e}")
+                    
                     verified_count += 1
                 else:
                     df_manifest.at[idx, "final_status"] = "parse_failed"
@@ -254,6 +279,9 @@ def run_download(config, limit=None, sector=None, resume=True, retry_failures=Fa
         return
         
     targets = df_manifest[mask_to_download].copy()
+    if sector is not None:
+        targets = targets[targets["sector"] == int(sector)].copy()
+        
     if limit is not None:
         targets = targets.head(int(limit))
         

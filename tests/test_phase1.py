@@ -530,3 +530,35 @@ def test_mast_toi_centroid_flag_maps_to_blend(mock_config):
     row = evidence[(evidence["tic_id"] == 112233) & (evidence["source_catalog"] == "MAST_TOI_EXOFOP")].iloc[0]
     assert row["canonical_label_candidate"] == "blend_contamination"
     assert row["evidence_strength"] == "strong"
+
+
+def test_dvr_xml_provenance_integration(mock_config):
+    mock_config.tce_catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "ticid": 24680, "tceid": "00000024680-01", "sectors": "s0078",
+        "lastUpdate": "2026-01-01", "tce_period": 2.0,
+        "tce_time0bt": 1500.0, "tce_depth": 1000.0, "tce_duration": 2.0,
+        "tce_dicco_msky": 3.0, "tce_dicco_msky_err": 0.2,
+        "tce_ditco_msky": 2.5, "tce_ditco_msky_err": 0.2,
+    }]).to_csv(mock_config.tce_catalog, index=False)
+
+    # Create dummy dvr_xml_manifest.parquet
+    dvr_manifest = pd.DataFrame([{
+        "tic_id": 24680, "sector": 78, "obs_id": "obs_1",
+        "mast_obsid": 1234, "product_uri": "uri_1",
+        "product_filename": "tess_dvr_xml_test.xml", "expected_size": 100,
+        "download_url": "url_1", "discovered_at": "now", "archive": "MAST",
+        "product_type": "SPOC_DVR_XML", "local_path": "path_1",
+        "sha256": "dummy_xml_sha256", "actual_size": 100, "status": "verified",
+        "failure_message": ""
+    }])
+    mock_config.ensure_dirs()
+    dvr_manifest.to_parquet(mock_config.manifests_dir / "dvr_xml_manifest.parquet", index=False)
+
+    import phase1.catalog_ingestion as ingestion
+    evidence = ingestion.ingest_all_catalogs(mock_config)
+    row = evidence[(evidence["tic_id"] == 24680) & evidence["source_catalog"].str.startswith("TESS_TCE_")].iloc[0]
+    
+    assert row["provenance_reference"] == "tess_dvr_xml_test.xml"
+    assert row["catalogue_checksum"] == "dummy_xml_sha256"
+    assert "tess_dvr_xml_test.xml" in row["notes"]
