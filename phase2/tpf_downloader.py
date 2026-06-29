@@ -8,6 +8,8 @@ import os
 import hashlib
 from pathlib import Path
 import urllib.request
+import urllib.parse
+import shutil
 from astropy.io import fits
 
 logger = logging.getLogger(__name__)
@@ -36,7 +38,9 @@ class TpfDownloader:
         """
         Downloads a single TPF from MAST.
         """
-        filename = f"tess2024{tic_id:012d}_sector-{sector:04d}_tpf.fits"
+        filename = Path(urllib.parse.urlparse(data_uri).path).name if "product/" in data_uri else ""
+        if not filename or not filename.endswith("_tp.fits"):
+            filename = f"TIC{tic_id}_sector{sector:04d}_tp.fits"
         dest_path = self.dest_dir / filename
         
         result = {
@@ -68,7 +72,7 @@ class TpfDownloader:
         # e.g., mast:TESS/product/tess2019112060037-s0011-0000000261136679-0143-s_tp.fits
         # url: https://mast.stsci.edu/api/v0.1/retrieve?uri=mast:TESS/product/...
         if data_uri.startswith("mast:"):
-            url = f"https://mast.stsci.edu/api/v0.1/retrieve?uri={data_uri}"
+            url = f"https://mast.stsci.edu/api/v0.1/Download/file?uri={data_uri}"
         else:
             url = data_uri
             
@@ -76,16 +80,21 @@ class TpfDownloader:
             logger.info(f"Downloading TPF for TIC {tic_id} from {url}...")
             
             # Simple chunked download with urllib
-            temp_path = dest_path.with_suffix(".tmp")
-            
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response, open(temp_path, "wb") as out_file:
-                chunk_size = 1024 * 1024 # 1MB
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    out_file.write(chunk)
+            temp_path = dest_path.with_suffix(dest_path.suffix + ".part")
+            offset = temp_path.stat().st_size if temp_path.exists() else 0
+            headers = {'User-Agent': 'TransitLens/2.2'}
+            if offset: headers['Range'] = f'bytes={offset}-'
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=120) as response:
+                append = offset > 0 and response.status == 206
+                mode = "ab" if append else "wb"
+                if not append: offset = 0
+                with open(temp_path, mode) as out_file:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out_file.write(chunk)
                     
             os.replace(temp_path, dest_path)
             
@@ -106,8 +115,7 @@ class TpfDownloader:
             
         except Exception as e:
             logger.error(f"Download failed for TIC {tic_id} sector {sector}: {e}")
-            if temp_path.exists():
-                temp_path.unlink()
+            # Preserve partial data for a later ranged resume.
             result["status"] = "failed"
             result["error"] = str(e)
             

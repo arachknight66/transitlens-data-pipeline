@@ -109,7 +109,7 @@ def _process_observation(row: dict, ml_core: str, tpf_map: dict, diagnostics_con
         "sector": int(row["sector"]), "split": str(row["split"]),
         "source_checksum": str(row.get("processed_sha256") or ""),
         "diagnostics_version": str(diagnostics_config.get("General", {}).get("diagnostics_version", "2.0.0")),
-        "feature_schema_version": "phase2-features-2.1.1", "ephemeris_mode": "detected",
+        "feature_schema_version": "phase2-features-2.2.0", "ephemeris_mode": "detected",
         "diagnostic_status": "unavailable", "diagnostic_failure_reason": "",
     })
     metadata = {
@@ -176,7 +176,8 @@ def _finite_or_none(value):
 
 def materialize_features(config, limit: int | None = None, *, workers: int = 1,
                          split: str | None = None, resume: bool = False,
-                         ephemeris_mode: str = "detected", dry_run: bool = False) -> dict:
+                         ephemeris_mode: str = "detected", dry_run: bool = False,
+                         output_dir: str | Path | None = None) -> dict:
     if ephemeris_mode != "detected":
         raise ValueError("official Phase 2 materialization permits only detected ephemerides")
     m = config.manifests_dir
@@ -203,7 +204,8 @@ def materialize_features(config, limit: int | None = None, *, workers: int = 1,
     import yaml
     diagnostics_config = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     diagnostics_config.setdefault("Gaia", {})["offline_only"] = True
-    diagnostics_config.setdefault("General", {})["development_limit"] = limit is not None
+    development_only = limit is not None or output_dir is not None
+    diagnostics_config.setdefault("General", {})["development_limit"] = development_only
     tpf_map = {}
     tpf_manifest = m / "tpf_discovery_manifest.parquet"
     if tpf_manifest.exists():
@@ -222,7 +224,7 @@ def materialize_features(config, limit: int | None = None, *, workers: int = 1,
     feature_frame = pd.DataFrame([item[0] for item in results], columns=IDENTITY_COLUMNS + FEATURE_COLUMNS)
     metadata_frame = pd.DataFrame([item[1] for item in results])
 
-    output_dir = m if limit is None else m / "phase2_development"
+    output_dir = Path(output_dir).resolve() if output_dir is not None else (m if limit is None else m / "phase2_development")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_names = {"train": "phase2_features_train.parquet", "val": "phase2_features_validation.parquet", "test": "phase2_features_test.parquet"}
     for split_name, output_name in output_names.items():
@@ -240,7 +242,7 @@ def materialize_features(config, limit: int | None = None, *, workers: int = 1,
     _atomic_text(json.dumps(units, indent=2), output_dir / "phase2_feature_units.json")
     integrity = {
         "representation": "one_best_observation_per_tic_label_independent_v1",
-        "ephemeris_mode": "detected", "development_only": limit is not None,
+        "ephemeris_mode": "detected", "development_only": development_only,
         "train_count": int((feature_frame.split == "train").sum()),
         "val_count": int((feature_frame.split == "val").sum()),
         "test_count": int((feature_frame.split == "test").sum()),
@@ -251,17 +253,17 @@ def materialize_features(config, limit: int | None = None, *, workers: int = 1,
     config_hash = hashlib.sha256(cfg_path.read_bytes()).hexdigest()
     card = f"""# Phase 2 feature card
 
-- Version: phase2-features-2.1.1
+- Version: phase2-features-2.2.0
 - Rows: one label-independent best observation per TIC
 - Ephemeris: TransitLens BLS detected only
 - Features: {len(FEATURE_COLUMNS)} ordered measurements and availability flags
 - Missingness: null/NaN plus explicit availability flags; no imputation
 - Labels: stored only in `phase2_feature_metadata.parquet`
 - Configuration SHA-256: `{config_hash}`
-- Development-only: `{limit is not None}`
+- Development-only: `{development_only}`
 """
     _atomic_text(card, output_dir / "phase2_feature_card.md")
-    return {"status": "DEVELOPMENT_ONLY" if limit is not None else "COMPLETE",
+    return {"status": "DEVELOPMENT_ONLY" if development_only else "COMPLETE",
             "features_count": len(feature_frame), "output_dir": str(output_dir), "split_integrity": integrity,
             "diagnostic_status": feature_frame.diagnostic_status.value_counts().to_dict()}
 

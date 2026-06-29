@@ -27,8 +27,8 @@ def binary_metrics(frame: pd.DataFrame, positive: str, score: str, threshold: fl
             "positive_support":int(y.sum()),"negative_support":int((~y).sum()),
             "precision_95ci":_wilson(tp,tp+fp),"recall_95ci":_wilson(tp,tp+fn)}
 
-def tune_thresholds(manifests: Path, output: Path) -> dict:
-    development=pd.concat([_joined(manifests,"train"),_joined(manifests,"val")],ignore_index=True)
+def tune_thresholds(manifests: Path, output: Path, selection_splits=("train","val")) -> dict:
+    development=pd.concat([_joined(manifests,split) for split in selection_splits],ignore_index=True)
     grid=np.linspace(0.05,0.95,91)
     def choose(label,score,minimum_precision=0.):
         candidates=[binary_metrics(development,label,score,float(t)) for t in grid]
@@ -36,7 +36,8 @@ def tune_thresholds(manifests: Path, output: Path) -> dict:
         return max(eligible or candidates,key=lambda x:(x["f1"],x["recall"],x["precision"]))
     eb=choose("eclipsing_binary","eb_risk_score")
     blend=choose("blend_contamination","blend_risk_score",0.75)
-    registry={"threshold_policy_version":"2.1.1","frozen":True,"selection_splits":["train","validation"],
+    display_splits=["validation" if split=="val" else split for split in selection_splits]
+    registry={"threshold_policy_version":"2.2.0","frozen":True,"selection_splits":display_splits,
               "blind_test_used":False,"ephemeris_mode":"detected","eb_risk_threshold":eb["threshold"],
               "blend_risk_threshold":blend["threshold"],"development_metrics":{"eb":eb,"blend":blend}}
     output.parent.mkdir(parents=True,exist_ok=True); output.write_text(yaml.safe_dump(registry,sort_keys=False),encoding="utf-8")
