@@ -13,7 +13,7 @@ when Phase 5's MAST download path isn't installed/available.
 import numpy as np
 
 
-def normalise_pdcsap(flux_raw, quality_flags=None, clip_sigma=5.0):
+def normalise_pdcsap(flux_raw, quality_flags=None, clip_sigma=50.0):
     """
     Normalises PDC-SAP flux to median = 1.0.
 

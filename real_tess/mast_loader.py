@@ -99,6 +99,79 @@ def fetch_light_curve(tic_id, sector=None, cache_dir="real_tess/cache", use_cach
             "offline demo."
         ) from exc
 
+    # Try direct astroquery download first
+    try:
+        from astroquery.mast import Observations
+        obs = Observations.query_criteria(objectname=f"TIC {clean_id}", project="TESS", obs_collection="TESS")
+        if len(obs) > 0:
+            # Filter by sector if specified
+            if sector is not None:
+                obs = obs[obs["sequence_number"].astype(int) == sector]
+            
+            if len(obs) > 0:
+                # Select the best sector (newest/highest sequence number first)
+                if sector is None:
+                    sectors_list = [int(s) for s in obs["sequence_number"]]
+                    best_idx = int(np.argmax(sectors_list))
+                    obs_selected = obs[best_idx]
+                else:
+                    obs_selected = obs[0]
+                
+                resolved_sector = int(obs_selected["sequence_number"])
+                products = Observations.get_product_list(obs_selected)
+                tess_products = Observations.filter_products(products, productSubGroupDescription="LC", extension="fits")
+                if len(tess_products) > 0:
+                    manifest = Observations.download_products(tess_products[0], cache=True)
+                    if len(manifest) > 0:
+                        downloaded_path = manifest[0]["Local Path"]
+                        if os.path.exists(downloaded_path):
+                            cache_path = os.path.join(cache_dir, _cache_filename(clean_id, resolved_sector))
+                            if os.path.exists(cache_path):
+                                os.remove(cache_path)
+                            os.rename(downloaded_path, cache_path)
+                            
+                            from real_tess.fits_parser import read_fits_lightcurve
+                            parsed = read_fits_lightcurve(cache_path)
+                            time_arr = parsed["time"]
+                            flux = normalise_pdcsap(parsed["flux_raw"], quality_flags=parsed["quality"])
+                            
+                            try:
+                                sha256 = hashlib.sha256()
+                                with open(cache_path, "rb") as f:
+                                    for block in iter(lambda: f.read(65536), b""):
+                                        sha256.update(block)
+                                csum = sha256.hexdigest()
+                            except Exception:
+                                csum = ""
+                                
+                            info_dict = {
+                                "stages": {
+                                    "search": "success_astroquery",
+                                    "product_selection": "success_astroquery",
+                                    "download": "success_astroquery",
+                                    "checksum": "success",
+                                    "parse": "success",
+                                    "photometry": "pipeline" if parsed["metadata"].get("flux_type_used") == "PDCSAP_FLUX" else "custom",
+                                    "analysis": "pending"
+                                },
+                                "provenance": {
+                                    "tic_id": clean_id,
+                                    "sector": resolved_sector,
+                                    "camera": parsed["metadata"].get("camera"),
+                                    "ccd": parsed["metadata"].get("ccd"),
+                                    "cadence": float(np.median(np.diff(time_arr)) * 1440.0) if len(time_arr) > 1 else 2.0,
+                                    "author": "SPOC" if "PDCSAP" in parsed["metadata"].get("flux_type_used", "") else "unknown",
+                                    "mast_uri": f"mast:TESS/product/{os.path.basename(cache_path)}",
+                                    "product_filename": os.path.basename(cache_path),
+                                    "checksum": csum,
+                                    "retrieval_time": _time_pkg.time(),
+                                    "code_version": "0.1.0"
+                                }
+                            }
+                            return time_arr, flux, resolved_sector, info_dict
+    except Exception as exc:
+        logger.warning(f"Astroquery download failed: {exc}. Falling back to lightkurve.")
+
     search_kwargs = {"mission": "TESS"}
     if sector is not None:
         search_kwargs["sector"] = sector
