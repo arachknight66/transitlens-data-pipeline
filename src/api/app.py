@@ -2,15 +2,22 @@
 
 from fastapi import FastAPI
 
+from api.exceptions import register_exception_handlers
+from api.routes import router
+from api.services import ApiServices
 from config import Settings, load_settings
 from logging_config import configure_logging
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    services: ApiServices | None = None,
+) -> FastAPI:
     """Create an independently configured FastAPI application.
 
     Args:
         settings: Optional validated settings. Defaults to environment settings.
+        services: Optional injected external service providers.
 
     Returns:
         Configured FastAPI application without business routes.
@@ -26,4 +33,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
     )
     application.state.settings = resolved_settings
+    application.state.services = services or ApiServices.from_settings(
+        resolved_settings
+    )
+    register_exception_handlers(application)
+    application.include_router(router)
     return application

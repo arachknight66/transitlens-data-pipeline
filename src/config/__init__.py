@@ -6,7 +6,7 @@ import os
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,10 +24,12 @@ class Settings(BaseSettings):
     cache_dir: Path = Path("data/cache")
     log_level: str = "INFO"
     mast_api_token: str | None = None
-    mast_session_token: str | None = None
     median_filter_window: int = Field(default=5, ge=3)
     wavelet: str = "db4"
-    wavelet_mode: str = "soft"
+    wavelet_mode: Literal["soft"] = "soft"
+    wavelet_threshold_scale: float = Field(default=0.5, ge=0.0, le=1.0)
+    wavelet_max_level: int = Field(default=2, ge=1)
+    quality_bitmask: Literal["none", "default", "hard", "hardest"] = "default"
 
     @field_validator("median_filter_window")
     @classmethod
@@ -38,7 +40,7 @@ class Settings(BaseSettings):
             raise ValueError(message)
         return value
 
-    @field_validator("mast_api_token", "mast_session_token", mode="before")
+    @field_validator("mast_api_token", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value: object) -> object:
         """Treat an empty optional credential as absent."""

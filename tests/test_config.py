@@ -35,16 +35,23 @@ def test_environment_overrides_configuration(
 
 def test_empty_credentials_are_absent() -> None:
     """Empty credentials select anonymous MAST access."""
-    settings = Settings(mast_api_token="", mast_session_token="")
+    settings = Settings(mast_api_token="")
 
     assert settings.mast_api_token is None
-    assert settings.mast_session_token is None
 
 
 def test_median_window_must_be_odd() -> None:
     """Even median-filter windows are rejected."""
     with pytest.raises(ValidationError, match="must be odd"):
         Settings(median_filter_window=4)
+
+
+def test_scientific_modes_are_restricted() -> None:
+    """Unsupported filtering modes are rejected during configuration loading."""
+    with pytest.raises(ValidationError):
+        Settings(wavelet_mode="hard")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Settings(quality_bitmask="unknown")  # type: ignore[arg-type]
 
 
 def test_missing_requested_configuration_raises(tmp_path: Path) -> None:
