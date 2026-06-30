@@ -6,7 +6,11 @@
 
 Current Phase
 
-Not Started
+Phase 1 complete - Repository Setup
+
+Completed on
+
+2026-06-30
 
 ---
 
@@ -63,7 +67,22 @@ None
 
 Completed
 
-None
+- Python 3.11+ project and dependency configuration
+- Ruff, Black, pytest, coverage, and pre-commit configuration
+- Typed TOML and environment-based runtime settings
+- Structured Loguru configuration
+- FastAPI application factory (business endpoints intentionally deferred)
+- Reproducible dependency lock file
+- Phase 1 smoke and configuration tests
+
+Verification
+
+- Ruff passes
+- Black passes
+- 7 tests pass
+- Test coverage: 98.25%
+- Source distribution and wheel build successfully
+- FastAPI application factory starts successfully
 
 Pending
 
@@ -71,6 +90,27 @@ Pending
 - FITS parser
 - Wavelet preprocessing
 - REST API
+
+---
+
+## Configuration Contract
+
+Default configuration is stored in `configs/default.toml`.
+
+Runtime values may be supplied with environment variables using the
+`TRANSITLENS_` prefix. Environment variables take precedence over values from
+the configuration file. MAST credentials remain optional and are never stored
+in source configuration.
+
+---
+
+## Phase 1 Notes
+
+- No MAST, FITS, preprocessing, feature, exporter, or business endpoint logic
+  has been implemented.
+- The FastAPI application uses an application factory so settings are injected
+  without mutable global application state.
+- Phase 2 should begin with MAST authentication only.
 
 ---
 

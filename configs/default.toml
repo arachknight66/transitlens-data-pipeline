@@ -1,0 +1,8 @@
+cache_dir = "data/cache"
+log_level = "INFO"
+mast_api_token = ""
+mast_session_token = ""
+median_filter_window = 5
+wavelet = "db4"
+wavelet_mode = "soft"
+
