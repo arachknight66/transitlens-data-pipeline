@@ -1,10 +1,10 @@
-"""The four documented TransitLens REST routes."""
+"""TransitLens REST routes."""
 
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 
 from api.exceptions import CachedPathError
 from api.models import (
@@ -14,10 +14,14 @@ from api.models import (
     ProcessRequest,
     ProcessResponse,
     StatusResponse,
+    UploadResponse,
 )
 from api.services import ApiServices
+from api.uploads import InvalidUploadError, StoredUpload, UploadStore
 from config import Settings
 from features.metadata import generate_feature_record
+from fits.csv_reader import read_csv_light_curve
+from fits.models import LightCurve
 from fits.reader import read_fits
 from mast.cache import FitsCache
 from mast.download import download_fits
@@ -98,6 +102,30 @@ def download(
 
 
 @router.post(
+    "/upload",
+    response_model=UploadResponse,
+    status_code=201,
+    responses={
+        413: {"model": ErrorResponse},
+        415: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+    },
+)
+async def upload(
+    file: Annotated[UploadFile, File(...)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> UploadResponse:
+    """Stream, validate, and temporarily cache a light-curve upload."""
+    stored = await _upload_store(settings).save(file)
+    return UploadResponse(
+        file_id=stored.file_id,
+        media_type=stored.media_type,
+        size_bytes=stored.size_bytes,
+    )
+
+
+@router.post(
     "/process",
     response_model=ProcessResponse,
     responses={403: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
@@ -106,13 +134,13 @@ def process(
     payload: ProcessRequest,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ProcessResponse:
-    """Run parsing, preprocessing, and features for one cached FITS file."""
-    fits_path = _validated_cached_path(payload.fits_path, settings.cache_dir)
+    """Run parsing, preprocessing, and features for cached input."""
+    raw, file_id = _read_process_source(payload, settings)
     preprocessing_config = payload.preprocessing or _default_preprocessing(settings)
-    raw = read_fits(fits_path, payload.mission)
     processed = preprocess_light_curve(raw, preprocessing_config)
     features = generate_feature_record(processed)
     return ProcessResponse(
+        file_id=file_id,
         time=processed.time.tolist(),
         flux=processed.flux.tolist(),
         normalized_flux=processed.normalized_flux.tolist(),
@@ -121,6 +149,44 @@ def process(
         quality=None if processed.quality is None else processed.quality.tolist(),
         metadata=processed.metadata,
         features=features,
+    )
+
+
+def _read_process_source(
+    payload: ProcessRequest,
+    settings: Settings,
+) -> tuple[LightCurve, str | None]:
+    """Resolve and read an opaque upload or legacy cached FITS path."""
+    if payload.file_id is not None:
+        stored = _upload_store(settings).resolve(payload.file_id)
+        raw = _read_upload(stored, payload.mission)
+        opaque_metadata = raw.metadata.model_copy(
+            update={"source_path": Path(stored.file_id)}
+        )
+        return raw.model_copy(update={"metadata": opaque_metadata}), stored.file_id
+    if payload.fits_path is None:
+        raise ValueError("process request source was not validated")
+    fits_path = _validated_cached_path(payload.fits_path, settings.cache_dir)
+    return read_fits(fits_path, payload.mission), None
+
+
+def _read_upload(stored: StoredUpload, mission: Mission | None) -> LightCurve:
+    """Read a validated upload through the canonical domain contract."""
+    if stored.media_type == "csv":
+        if mission is None:
+            raise InvalidUploadError("mission is required to process a CSV upload")
+        return read_csv_light_curve(stored.path, mission)
+    return read_fits(stored.path, mission)
+
+
+def _upload_store(settings: Settings) -> UploadStore:
+    """Create a request-scoped upload store from application settings."""
+    root = settings.upload_cache_dir or settings.cache_dir / "uploads"
+    return UploadStore(
+        root,
+        max_size_bytes=settings.max_upload_size_bytes,
+        chunk_size_bytes=settings.upload_chunk_size_bytes,
+        retention_seconds=settings.upload_retention_seconds,
     )
 
 

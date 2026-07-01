@@ -54,6 +54,21 @@ def test_scientific_modes_are_restricted() -> None:
         Settings(quality_bitmask="unknown")  # type: ignore[arg-type]
 
 
+def test_upload_limits_are_typed_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload bounds can be configured without hardcoded deployment values."""
+    monkeypatch.setenv("TRANSITLENS_MAX_UPLOAD_SIZE_BYTES", "2048")
+    monkeypatch.setenv("TRANSITLENS_UPLOAD_CHUNK_SIZE_BYTES", "256")
+    monkeypatch.setenv("TRANSITLENS_UPLOAD_RETENTION_SECONDS", "60")
+
+    settings = load_settings()
+
+    assert settings.max_upload_size_bytes == 2048
+    assert settings.upload_chunk_size_bytes == 256
+    assert settings.upload_retention_seconds == 60
+
+
 def test_missing_requested_configuration_raises(tmp_path: Path) -> None:
     """A missing explicit configuration path is not silently ignored."""
     with pytest.raises(FileNotFoundError):

@@ -1,4 +1,8 @@
 cache_dir = "data/cache"
+upload_cache_dir = "data/cache/uploads"
+max_upload_size_bytes = 104857600
+upload_chunk_size_bytes = 1048576
+upload_retention_seconds = 86400
 log_level = "INFO"
 mast_api_token = ""
 median_filter_window = 5

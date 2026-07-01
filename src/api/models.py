@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from features.models import FeatureRecord
 from mast.models import Mission
@@ -49,14 +49,32 @@ class DownloadResponse(BaseModel):
     from_cache: bool
 
 
-class ProcessRequest(BaseModel):
-    """Request to process a FITS file already held in the service cache."""
+class UploadResponse(BaseModel):
+    """Opaque reference returned for a validated temporary upload."""
 
     model_config = ConfigDict(frozen=True)
 
-    fits_path: Path
+    file_id: str
+    media_type: Literal["fits", "fit", "csv"]
+    size_bytes: int
+
+
+class ProcessRequest(BaseModel):
+    """Request to process an opaque upload or legacy cached FITS path."""
+
+    model_config = ConfigDict(frozen=True)
+
+    file_id: str | None = None
+    fits_path: Path | None = None
     mission: Mission | None = None
     preprocessing: PreprocessingConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "ProcessRequest":
+        """Require exactly one opaque identifier or legacy cached path."""
+        if (self.file_id is None) == (self.fits_path is None):
+            raise ValueError("provide exactly one of file_id or fits_path")
+        return self
 
 
 class ProcessResponse(BaseModel):
@@ -64,6 +82,7 @@ class ProcessResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    file_id: str | None = None
     time: list[float]
     flux: list[float]
     normalized_flux: list[float]

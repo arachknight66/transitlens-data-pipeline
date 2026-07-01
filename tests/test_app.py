@@ -15,10 +15,10 @@ def test_create_app_uses_supplied_settings() -> None:
     assert application.title == "TransitLens Data Pipeline"
 
 
-def test_application_exposes_only_documented_business_routes() -> None:
-    """The application exposes exactly the four documented endpoint paths."""
+def test_application_exposes_only_authorized_business_routes() -> None:
+    """The application exposes documented routes plus authorized upload."""
     create_app(Settings(log_level="WARNING"))
     route_paths = {route.path for route in router.routes}
 
-    assert route_paths == {"/search", "/download", "/process", "/status"}
+    assert route_paths == {"/search", "/download", "/upload", "/process", "/status"}
     assert "/docs" not in route_paths

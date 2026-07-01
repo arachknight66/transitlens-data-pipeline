@@ -5,6 +5,13 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from api.models import ErrorResponse
+from api.uploads import (
+    InvalidUploadError,
+    UnsupportedUploadError,
+    UploadError,
+    UploadNotFoundError,
+    UploadTooLargeError,
+)
 from exporters.exceptions import ExportError
 from features.exceptions import FeatureError
 from fits.exceptions import FitsError, FitsReadError
@@ -48,6 +55,22 @@ def register_exception_handlers(application: FastAPI) -> None:
         _handler(status_code=403, code="cached_path_required"),
     )
     application.add_exception_handler(
+        UnsupportedUploadError,
+        _handler(status_code=415, code="unsupported_upload_type"),
+    )
+    application.add_exception_handler(
+        UploadTooLargeError,
+        _handler(status_code=413, code="upload_too_large"),
+    )
+    application.add_exception_handler(
+        UploadNotFoundError,
+        _handler(status_code=404, code="upload_not_found"),
+    )
+    application.add_exception_handler(
+        InvalidUploadError,
+        _handler(status_code=422, code="invalid_upload"),
+    )
+    application.add_exception_handler(
         FitsReadError,
         _handler(status_code=422, code="fits_read_failed"),
     )
@@ -66,6 +89,10 @@ def register_exception_handlers(application: FastAPI) -> None:
     application.add_exception_handler(
         ExportError,
         _handler(status_code=500, code="export_failed"),
+    )
+    application.add_exception_handler(
+        UploadError,
+        _handler(status_code=500, code="upload_storage_failed"),
     )
 
 

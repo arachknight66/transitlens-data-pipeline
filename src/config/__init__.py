@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     )
 
     cache_dir: Path = Path("data/cache")
+    upload_cache_dir: Path | None = None
+    max_upload_size_bytes: int = Field(default=104_857_600, gt=0)
+    upload_chunk_size_bytes: int = Field(default=1_048_576, gt=0)
+    upload_retention_seconds: int = Field(default=86_400, gt=0)
     log_level: str = "INFO"
     mast_api_token: str | None = None
     median_filter_window: int = Field(default=5, ge=3)

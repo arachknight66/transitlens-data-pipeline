@@ -1,5 +1,6 @@
 """FITS reading and validation package."""
 
+from fits.csv_reader import read_csv_light_curve, validate_csv
 from fits.exceptions import (
     FitsColumnError,
     FitsError,
@@ -20,5 +21,7 @@ __all__ = [
     "LightCurve",
     "LightCurveMetadata",
     "UnsupportedMissionError",
+    "read_csv_light_curve",
     "read_fits",
+    "validate_csv",
 ]

@@ -18,6 +18,7 @@ dependencies = [
     "pandas>=2.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
+    "python-multipart>=0.0.20",
     "pyarrow>=17.0",
     "PyWavelets>=1.6",
     "scipy>=1.13",

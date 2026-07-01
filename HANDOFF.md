@@ -10,7 +10,7 @@ Phase 7 complete - Testing and Validation
 
 Completed on
 
-2026-06-30
+2026-07-01
 
 ---
 
@@ -21,6 +21,8 @@ REST API
 GET /search
 
 POST /download
+
+POST /upload
 
 POST /process
 
@@ -67,8 +69,9 @@ REST Request Contracts
 
 - `GET /search`: `target`, optional repeated `missions`, `radius_deg`, `limit`
 - `POST /download`: JSON `mast_id`
-- `POST /process`: JSON `fits_path`, optional `mission`, optional
-  `preprocessing`
+- `POST /upload`: multipart field `file`; accepts `.fits`, `.fit`, and `.csv`
+- `POST /process`: JSON `file_id` (preferred) or legacy `fits_path`, optional
+  `mission`, optional `preprocessing`; CSV requires `mission`
 - `GET /status`: no parameters
 
 ---
@@ -160,13 +163,20 @@ Completed
 - Whole-pipeline array, feature, NumPy, and Parquet consistency validation
 - 50,000-cadence local pipeline performance benchmark
 - Final repository scope and dependency audit
+- Bounded multipart upload streaming with configurable maximum size
+- FITS, FIT, and chunk-validated CSV upload support
+- Secure extension-only filename handling and atomic temporary storage
+- Random opaque upload identifiers with no filesystem path disclosure
+- Opaque identifier resolution by POST `/process`
+- TTL cleanup for completed uploads and abandoned partial files
+- Upload validation, size, traversal, cleanup, and workflow tests
 
 Verification
 
 - Ruff passes
 - Black passes
-- 119 tests pass
-- Test coverage: 98.05%
+- 131 tests pass
+- Test coverage: 95.66%
 - Source distribution and wheel build successfully
 - FastAPI application factory starts successfully
 - Anonymous public MAST search and FITS download verified with Kepler-10
@@ -187,6 +197,9 @@ Verification
 - Repeated full-pipeline runs produce identical arrays, feature records, and
   artifact digests
 - The 50,000-cadence parse-to-export benchmark completed in 0.12 seconds
+- FITS, FIT, and CSV multipart uploads validated successfully
+- Uploaded FITS and CSV files completed the canonical processing pipeline by
+  opaque identifier without exposing an internal filesystem path
 
 Pending
 
@@ -203,12 +216,39 @@ Runtime values may be supplied with environment variables using the
 the configuration file. MAST credentials remain optional and are never stored
 in source configuration.
 
+Upload configuration:
+
+- `upload_cache_dir`: optional dedicated upload directory; defaults to the
+  `uploads` child of `cache_dir`
+- `max_upload_size_bytes`: maximum file-content size; default 104,857,600 bytes
+- `upload_chunk_size_bytes`: bounded stream read size; default 1,048,576 bytes
+- `upload_retention_seconds`: temporary-file TTL; default 86,400 seconds
+
+---
+
+## Upload Contract
+
+- `POST /upload` accepts one multipart `file` field.
+- Original filenames are never used as storage paths. Only a validated,
+  case-insensitive `.fits`, `.fit`, or `.csv` suffix is retained.
+- FITS and FIT content is validated through the production Astropy reader.
+- CSV content is validated in bounded chunks and must contain `TIME` plus one
+  of `PDCSAP_FLUX`, `SAP_FLUX`, or `FLUX`; quality is optional.
+- A successful response contains only `file_id`, `media_type`, and `size_bytes`.
+- `file_id` is a random 128-bit opaque identifier. Clients do not receive or
+  share the data-pipeline filesystem path.
+- `POST /process` accepts that identifier in `file_id`. Uploaded source paths
+  are replaced by the opaque identifier in processing and feature metadata.
+- Upload errors map to 413 (too large), 415 (unsupported type), 422 (invalid
+  content), 404 (unknown or expired identifier), or 500 (storage failure).
+
 ---
 
 ## Phase 7 Notes
 
-- Exactly four business endpoints are exposed. Documentation and OpenAPI routes
-  remain disabled so no additional endpoint paths are introduced.
+- Exactly five authorized business endpoints are exposed. `/upload` is the
+  explicit post-audit addition to the frozen API; documentation and OpenAPI
+  routes remain disabled.
 - The FastAPI application uses an application factory so settings are injected
   without mutable global application state.
 - Anonymous access is the default. `TRANSITLENS_MAST_API_TOKEN` enables optional
